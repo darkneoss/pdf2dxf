@@ -1,0 +1,33 @@
+# Salidas de conversión — se regeneran desde los PDF, no van al repo
+salida/
+*.dxf
+*.dwg
+*.bak
+
+# Planos de cliente: NUNCA deben entrar al historial
+*.pdf
+PDF Images/
+PDFTEST/
+
+# Imágenes de diagnóstico que genera el comparador
+*.png
+*.jpg
+
+# Bitácoras
+*.log
+*.out
+*.err
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Editor / sistema
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
