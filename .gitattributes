@@ -1,0 +1,14 @@
+# Normalizar finales de linea: en el repo siempre LF, en el disco los del SO.
+* text=auto eol=lf
+
+# Estos son de Windows y deben conservar CRLF al clonarse ahi
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binarios: que git no los toque
+*.pdf binary
+*.dxf binary
+*.dwg binary
+*.png binary
+*.jpg binary
