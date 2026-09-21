@@ -983,8 +983,17 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
         cache = set()
         for f in extraer_texto(pagina, conv):
             estilo, cap, ttf = estilo_para(dxf, f["fuente"], cache)
-            # altura DXF = tamano de fuente x cap height
-            alto = f["alto"] * cap
+            fac = factor_ancho(f["texto"], ttf, f["tam_pt"], f["ancho_pt"])
+            corregir_ancho = fac > 0 and abs(fac - 1.0) > 0.05
+            # PyMuPDF devuelve en span["size"] la media geometrica de las
+            # escalas cuando el PDF usa Tz. Para los spans corregidos, la
+            # escala vertical real es tam_pt / fac; asi la altura y \W^2
+            # conservan el mismo producto (alto * ancho) de antes.
+            if corregir_ancho:
+                alto = (f["tam_pt"] / fac / PUNTOS_POR_PULGADA) * cap
+            else:
+                # Sin correccion se conserva exactamente la altura anterior.
+                alto = f["alto"] * cap
             attr = {
                 "layer": "0" if _modo_capas == "una" else CAPA_TEXTO,
                 "style": estilo,
@@ -1010,13 +1019,12 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
             x, y = f["ins"]
             attr["insert"] = (x, y - 0.017 * alto)
             cuerpo = escapa_mtext(f["texto"])
-            fac = factor_ancho(f["texto"], ttf, f["tam_pt"], f["ancho_pt"])
             # Solo si la diferencia es real (>5%). Por debajo es ruido de
             # medicion: el subconjunto de fuente embebido en el PDF no tiene
             # metricas identicas al Arial del sistema.
-            if abs(fac - 1.0) > 0.05:
+            if corregir_ancho:
                 # \W es el codigo de MTEXT para el factor de anchura
-                cuerpo = "\\W%.4f;%s" % (fac, cuerpo)
+                cuerpo = "\\W%.4f;%s" % (fac ** 2, cuerpo)
                 n_ajustados[0] += 1
             t_ent = msp.add_mtext(cuerpo, dxfattribs=attr)
             # el texto siempre al frente
