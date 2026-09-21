@@ -8,6 +8,7 @@ salida/
 *.pdf
 PDF Images/
 PDFTEST/
+referencias/
 
 # Imágenes de diagnóstico que genera el comparador
 *.png
