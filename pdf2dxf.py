@@ -682,13 +682,28 @@ def extraer_texto(pagina, conv):
 
 # ------------------------------------------------------------------ imagenes
 
-def extraer_imagenes(doc, pagina, conv, dxf, msp, carpeta_img):
+def extraer_imagenes(doc, pagina, conv, dxf, msp, carpeta_img, nombre_dibujo):
     """Guarda las imagenes raster como PNG y las referencia desde el DXF.
 
     AutoCAD hace lo mismo con su carpeta 'PDF Images': el DXF no incrusta la
     imagen, la referencia. Si la carpeta se separa del DXF, el plano abre con
     las imagenes perdidas.
     """
+    # En un lote todos los DXF comparten "PDF Images". El prefijo por dibujo
+    # evita que img_0000.png de un plano reemplace el de otro, sin dejar de
+    # usar una ruta relativa que pueda viajar junto con el DXF.
+    stem = Path(nombre_dibujo).stem
+    seguro = "".join("_" if ord(c) < 32 or c in '<>:\"/\\|?*' else c
+                     for c in stem).rstrip(". ")
+    if seguro != stem:
+        # Los nombres validos de Windows conservan su stem legible; para uno
+        # invalido en Windows agregamos una huella corta para no colisionar al
+        # sustituir caracteres prohibidos.
+        import hashlib
+        seguro = "%s_%s" % (seguro or "drawing",
+                             hashlib.sha1(stem.encode("utf-8")).hexdigest()[:8])
+    nombre_dibujo = seguro or "drawing"
+
     n = 0
     try:
         info = pagina.get_image_info(xrefs=True)
@@ -703,7 +718,7 @@ def extraer_imagenes(doc, pagina, conv, dxf, msp, carpeta_img):
             if pix.n - pix.alpha >= 4:          # CMYK -> RGB
                 pix = fitz.Pixmap(fitz.csRGB, pix)
             carpeta_img.mkdir(parents=True, exist_ok=True)
-            ruta = carpeta_img / f"img_{k:04d}.png"
+            ruta = carpeta_img / f"{nombre_dibujo}_{k:04d}.png"
             pix.save(ruta)
         except Exception:
             continue
@@ -1038,7 +1053,7 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
     n_img = 0
     if con_imagenes:
         n_img = extraer_imagenes(doc, pagina, conv, dxf, msp,
-                                 ruta_dxf.parent / "PDF Images")
+                                 ruta_dxf.parent / "PDF Images", ruta_dxf.name)
 
     # --- Zoom extension al abrir ---------------------------------------
     #
