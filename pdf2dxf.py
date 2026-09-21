@@ -984,7 +984,11 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
         for f in extraer_texto(pagina, conv):
             estilo, cap, ttf = estilo_para(dxf, f["fuente"], cache)
             fac = factor_ancho(f["texto"], ttf, f["tam_pt"], f["ancho_pt"])
-            corregir_ancho = fac > 0 and abs(fac - 1.0) > 0.05
+            # Solo se corrige compresion real: la medicion PDFium encontro
+            # Tz != 1 en 256/256 spans con fac < 1, pero Tz = 1 en 9/9 con
+            # fac > 1. Estos ultimos son ruido de metricas del subset de fuente,
+            # no estiramiento del PDF.
+            corregir_ancho = 0 < fac < 0.95
             # PyMuPDF devuelve en span["size"] la media geometrica de las
             # escalas cuando el PDF usa Tz. Para los spans corregidos, la
             # escala vertical real es tam_pt / fac; asi la altura y \W^2
