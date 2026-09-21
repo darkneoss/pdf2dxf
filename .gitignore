@@ -31,3 +31,6 @@ venv/
 .idea/
 Thumbs.db
 desktop.ini
+
+# Sondeos del spike de licencia: salidas locales, no van al repo
+spike/
