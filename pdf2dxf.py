@@ -378,9 +378,8 @@ def extraer_trazos(pagina, conv):
         # completa; la entrada almacenada conserva además la caja entera.
         firma_rapida = (n_paths, tuple(conteos),
                          tuple(round(v, 6) for v in primero + ultimo))
-        conocida = cache_recortes_rapidos.get(firma_rapida)
-        if conocida is not None:
-            return conocida
+        if firma_rapida in cache_recortes_rapidos:
+            return cache_recortes_rapidos[firma_rapida]
         xs, ys = [], []
         for i, n_segmentos in enumerate(conteos):
             for j in range(n_segmentos):
@@ -393,24 +392,32 @@ def extraer_trazos(pagina, conv):
             return None
         # El clip efectivo ya está en espacio de página; los paths normales
         # no necesariamente lo están (pueden llevar matriz de Form XObject).
-        a = conv((min(xs) - crop_x0, alto_crop - (min(ys) - crop_y0)))
-        b = conv((max(xs) - crop_x0, alto_crop - (max(ys) - crop_y0)))
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        a = conv((x0 - crop_x0, alto_crop - (y0 - crop_y0)))
+        b = conv((x1 - crop_x0, alto_crop - (y1 - crop_y0)))
         caja = (min(a[0], b[0]), min(a[1], b[1]),
                 max(a[0], b[0]), max(a[1], b[1]))
         firma = (n_paths, tuple(conteos),
                  tuple(round(v, 6) for v in caja))
-        caja = cache_recortes.setdefault(firma, caja)
+        if firma in cache_recortes:
+            caja = cache_recortes[firma]
+        else:
+            cache_recortes[firma] = caja
         cache_recortes_rapidos[firma_rapida] = caja
         return caja
 
-    def emitir(pts, cerrado, color, relleno, circulo=None):
+    def emitir(pts, cerrado, color, relleno, circulo=None, caja_trazo=None):
         caja = recorte[0]
         if caja is not None:
-            xs = [q[0] for q in pts]
-            ys = [q[1] for q in pts]
             # si cabe entero dentro, no hay nada que recortar
-            if not (xs and caja[0] <= min(xs) and max(xs) <= caja[2]
-                    and caja[1] <= min(ys) and max(ys) <= caja[3]):
+            if caja_trazo is None:
+                xs = [q[0] for q in pts]
+                ys = [q[1] for q in pts]
+                caja_trazo = (min(xs), min(ys), max(xs), max(ys)) if xs else None
+            if not (caja_trazo is not None and caja[0] <= caja_trazo[0]
+                    and caja_trazo[2] <= caja[2]
+                    and caja[1] <= caja_trazo[1]
+                    and caja_trazo[3] <= caja[3]):
                 if relleno or cerrado:
                     pts = recorta_cerrado(pts, caja)
                     if len(pts) < 3:
@@ -430,7 +437,7 @@ def extraer_trazos(pagina, conv):
                             circ))
         contador[0] += 1
 
-    def emitir_actual(pts, cerrado, color, relleno):
+    def emitir_actual(pts, cerrado, color, relleno, caja_trazo):
         # PDFium suele materializar el último segmento de ``h`` hasta el
         # punto inicial; PyMuPDF sólo marcaba closePath. Conservamos el mismo
         # contrato (vértices sin repetir + cerrado) para no sumar el borde
@@ -439,7 +446,7 @@ def extraer_trazos(pagina, conv):
         if cerrado and not relleno and len(pts) > 2 and \
                 dist(pts[0], pts[-1]) <= TOLERANCIA_UNION:
             pts = pts[:-1]
-        emitir(pts, cerrado, color, relleno, circulo)
+        emitir(pts, cerrado, color, relleno, circulo, caja_trazo)
 
     # get_objects() desciende en Form XObjects. Su iteración es el orden de
     # pintura que el motor conserva para hatches y tabla de redraw.
@@ -462,6 +469,7 @@ def extraer_trazos(pagina, conv):
         recorte[0] = recorte_de(objeto)
 
         actual, cerrado = [], False
+        x_min = x_max = y_min = y_max = None
         n_segmentos = pdfium_raw.FPDFPath_CountSegments(objeto)
         i = 0
         while i < n_segmentos:
@@ -473,13 +481,22 @@ def extraer_trazos(pagina, conv):
                 continue
             if tipo == pdfium_raw.FPDF_SEGMENT_MOVETO:
                 if len(actual) > 1:
-                    emitir_actual(actual, cerrado or relleno, color, relleno)
+                    emitir_actual(actual, cerrado or relleno, color, relleno,
+                                  (x_min, y_min, x_max, y_max))
                 actual, cerrado = [p], False
+                x_min = x_max = p[0]
+                y_min = y_max = p[1]
             elif tipo == pdfium_raw.FPDF_SEGMENT_LINETO:
                 if not actual:
                     actual = [p]
+                    x_min = x_max = p[0]
+                    y_min = y_max = p[1]
                 else:
                     actual.append(p)
+                    x_min = p[0] if p[0] < x_min else x_min
+                    x_max = p[0] if p[0] > x_max else x_max
+                    y_min = p[1] if p[1] < y_min else y_min
+                    y_max = p[1] if p[1] > y_max else y_max
                 cerrado = cerrado or bool(pdfium_raw.FPDFPathSegment_GetClose(segmento))
             elif tipo == pdfium_raw.FPDF_SEGMENT_BEZIERTO:
                 # Una cúbica aparece como tres BEZIERTO: dos controles y el
@@ -493,17 +510,32 @@ def extraer_trazos(pagina, conv):
                             pdfium_raw.FPDFPathSegment_GetType(s3) ==
                             pdfium_raw.FPDF_SEGMENT_BEZIERTO and
                             p2 is not None and p3 is not None):
-                        actual.extend(bezier(actual[-1], p, p2, p3))
+                        nuevos = bezier(actual[-1], p, p2, p3)
+                        actual.extend(nuevos)
+                        for q in nuevos:
+                            x_min = q[0] if q[0] < x_min else x_min
+                            x_max = q[0] if q[0] > x_max else x_max
+                            y_min = q[1] if q[1] < y_min else y_min
+                            y_max = q[1] if q[1] > y_max else y_max
                         cerrado = cerrado or bool(
                             pdfium_raw.FPDFPathSegment_GetClose(s3))
                         i += 2
                     else:
                         actual.append(p)
+                        x_min = p[0] if p[0] < x_min else x_min
+                        x_max = p[0] if p[0] > x_max else x_max
+                        y_min = p[1] if p[1] < y_min else y_min
+                        y_max = p[1] if p[1] > y_max else y_max
                 else:
                     actual.append(p)
+                    x_min = p[0] if p[0] < x_min else x_min
+                    x_max = p[0] if p[0] > x_max else x_max
+                    y_min = p[1] if p[1] < y_min else y_min
+                    y_max = p[1] if p[1] > y_max else y_max
             i += 1
         if len(actual) > 1:
-            emitir_actual(actual, cerrado or relleno, color, relleno)
+            emitir_actual(actual, cerrado or relleno, color, relleno,
+                          (x_min, y_min, x_max, y_max))
 
     return trazos
 
