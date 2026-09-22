@@ -12,7 +12,9 @@ en número de entidades es del **0.2%**, y la extensión, los colores de capa,
 las alturas de texto y los estilos coinciden.
 
 Y en un punto concreto lo mejora: **respeta la compresión horizontal del
-texto**, que AutoCAD descarta al importar.
+texto**, que AutoCAD descarta al importar. El factor se lee directamente de la
+matriz del texto, así que es exacto y no inferido — y no hace falta tener
+ninguna fuente instalada para que funcione, en cualquier plataforma.
 
 ---
 
@@ -38,6 +40,8 @@ los mismos nombres que usa AutoCAD, para no romper flujos existentes.
   escribe de forma fiable. DXF lo abre AutoCAD y cualquier otro CAD. Con
   `--dwg` se usa [ODA File Converter](https://www.opendesign.com/guestfiles/oda_file_converter)
   si está instalado (gratuito, propietario, se instala aparte).
+  Por honestidad: ese camino nunca se ejerció aquí, porque el conversor nunca
+  se instaló. El camino probado es el de DXF.
 - **Recuperar el proyecto original.** Del PDF salen geometría, texto y
   rellenos en tres capas: no hay bloques, ni capas del proyecto, ni cotas
   asociativas. Si quien emitió los planos conserva el DWG o el RVT, pedirlo
@@ -171,7 +175,14 @@ si vas a tocar el motor.
 
 ## Licencia
 
-**AGPL-3.0** — ver [LICENSE](LICENSE).
+**MIT** — ver [LICENSE](LICENSE). Se puede usar en trabajo comercial o de
+código cerrado, sin obligación de devolver nada.
 
-La licencia viene impuesta por [PyMuPDF](https://pymupdf.readthedocs.io/), que
-es AGPL-3.0 o comercial de Artifex. [ezdxf](https://ezdxf.mozman.at/) es MIT.
+Todas las dependencias son permisivas, que es lo que lo hace posible:
+[pypdfium2](https://pypdfium2.readthedocs.io/) es BSD-3-Clause sobre el PDFium
+de Google (Apache-2.0), [ezdxf](https://ezdxf.mozman.at/) es MIT y
+[Pillow](https://python-pillow.org/) es MIT-CMU.
+
+Las versiones anteriores eran AGPL-3.0 porque la lectura del PDF pasaba por
+PyMuPDF, que es AGPL-3.0 o comercial de Artifex. La licencia nunca fue una
+elección, así que se reescribió el lector sobre PDFium para quitarla.

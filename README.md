@@ -11,7 +11,9 @@ by entity and property by property, until its behaviour was reproduced. On a
 extents, layer colours, text heights and styles match.
 
 On one point it does better: it **honours the horizontal compression of text**,
-which AutoCAD discards on import.
+which AutoCAD discards on import. The factor is read straight from the text
+matrix, so it is exact rather than inferred — and no font has to be installed
+for it to work, on any platform.
 
 ---
 
@@ -37,6 +39,8 @@ the same names AutoCAD uses, so existing workflows keep working.
   reliably. DXF opens natively in AutoCAD and every other CAD package. With
   `--dwg` the tool uses [ODA File Converter](https://www.opendesign.com/guestfiles/oda_file_converter)
   if it is installed — free of charge, proprietary, installed separately.
+  In the interest of honesty: that path has never been exercised here, because
+  the converter was never installed. The DXF path is the tested one.
 - **Recover the original project.** A PDF yields geometry, text and fills on
   three layers: no blocks, no project layers, no associative dimensions. If
   whoever issued the drawings still has the DWG or the RVT, asking for it
@@ -169,7 +173,14 @@ you plan to change the engine.
 
 ## Licence
 
-**AGPL-3.0** — see [LICENSE](LICENSE).
+**MIT** — see [LICENSE](LICENSE). Use it in commercial or closed-source
+work; nothing has to be given back.
 
-The licence is imposed by [PyMuPDF](https://pymupdf.readthedocs.io/), which is
-AGPL-3.0 or commercial from Artifex. [ezdxf](https://ezdxf.mozman.at/) is MIT.
+Every dependency is permissive, which is what makes that possible:
+[pypdfium2](https://pypdfium2.readthedocs.io/) is BSD-3-Clause over Google's
+PDFium (Apache-2.0), [ezdxf](https://ezdxf.mozman.at/) is MIT and
+[Pillow](https://python-pillow.org/) is MIT-CMU.
+
+Earlier versions were AGPL-3.0, because PDF reading went through PyMuPDF and
+that library is AGPL-3.0 or commercial from Artifex. The licence was never a
+choice, so the PDF reader was rewritten on PDFium to remove it.

@@ -14,6 +14,25 @@ evidente, y revertir cualquiera rompe la fidelidad.
 mayúsculas, no el cuerpo de la fuente. Verificado en toda la distribución:
 6pt→0.0597, 8pt→0.0796, 10pt→0.0995.
 
+**...y "tamaño de fuente" es la escala vertical, no la media geométrica.**
+Cuando el PDF comprime el texto en horizontal, la matriz no es uniforme y las
+dos escalas difieren. AutoCAD toma la vertical. Importa porque el
+`span["size"]` de PyMuPDF devuelve `sqrt(|ad-bc|)`, la media geométrica de
+ambas, que es menor por `sqrt(Tz)`: en un título con Tz = 0.40 da 48.73 pt
+cuando la escala vertical es 77.04 y AutoCAD escribe 77.04 × 0.716 = 55.15.
+Usar la media para la altura dibuja el título al 63% de su tamaño — correcto
+de ancho, achatado de alto. PDFium entrega las dos escalas por separado, así
+que la duda no aparece: la altura sale de `hypot(c, d)` y el factor de ancho
+de `hypot(a, b) / hypot(c, d)`.
+
+**Inferir ese factor a partir de las cajas envolventes inventa compresión.**
+Antes de leerlo de la matriz se infería, comparando la caja del span contra el
+ancho natural de la fuente del sistema. Medido contra el valor real en 265
+spans: se detectaron los 256 realmente comprimidos, pero también 9 cuyo factor
+real era exactamente 1.0000 — el subconjunto de fuente embebido en el PDF no
+mide igual que el Arial instalado. Esos nueve se estiraban hasta un 6% sin
+motivo.
+
 **Los colores se truncan, no se redondean.** AutoCAD escribe (0,63,128) donde
 redondear da (0,64,128). Afecta a ~13,700 entidades de un solo plano.
 

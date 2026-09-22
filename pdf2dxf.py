@@ -1,14 +1,11 @@
 #!/usr/bin/env python
-# Copyright (C) 2026  darkneoss
+# Copyright (c) 2026  darkneoss
 #
-# Este programa es software libre: puede redistribuirlo y modificarlo bajo
-# los terminos de la GNU Affero General Public License version 3, tal como
-# la publica la Free Software Foundation. Vease el archivo LICENSE.
+# Licencia MIT: vease el archivo LICENSE.
 #
-# Se distribuye con la esperanza de que sea util, pero SIN GARANTIA ALGUNA.
-#
-# La licencia es AGPL porque PyMuPDF, la libreria de lectura de PDF, es
-# AGPL-3.0 (o comercial de Artifex). ezdxf, la de escritura, es MIT.
+# Se pudo relicenciar a MIT al sustituir PyMuPDF (AGPL-3.0 o comercial de
+# Artifex) por pypdfium2 (BSD-3-Clause sobre PDFium, Apache-2.0). Las otras
+# dependencias ya eran permisivas: ezdxf es MIT y Pillow es MIT-CMU.
 """
 pdf2dxf.py - vector PDF to DXF converter. No AutoCAD, no licences, no cloud.
 
@@ -54,10 +51,12 @@ import os
 import sys
 import math
 import time
+import ctypes
 from pathlib import Path
 
-import fitz          # PyMuPDF: lectura del PDF
 import ezdxf         # escritura del DXF
+import pypdfium2 as pdfium
+import pypdfium2.raw as pdfium_raw
 
 PUNTOS_POR_PULGADA = 72.0
 SEGMENTOS_BEZIER = 8          # tramos por curva al aplanar
@@ -272,7 +271,7 @@ def recorta_cerrado(pts, caja):
 
 
 class Lienzo:
-    """Coordenadas de PyMuPDF (origen arriba-izquierda, puntos) ->
+    """Coordenadas relativas al CropBox, origen arriba-izquierda, puntos ->
     coordenadas DXF (origen abajo-izquierda, pulgadas)."""
 
     def __init__(self, alto_puntos):
@@ -307,6 +306,11 @@ class Trazo:
 # ------------------------------------------------------------------ geometria
 
 def extraer_trazos(pagina, conv):
+    """Extrae paths con PDFium y los adapta al contrato de ``Trazo``.
+
+    PDFium conserva las coordenadas de usuario crudas, mientras que ``conv``
+    espera las de PyMuPDF: relativas al CropBox y con Y hacia abajo.
+    """
     trazos = []
     contador = [0]
 
@@ -314,15 +318,102 @@ def extraer_trazos(pagina, conv):
     grupo = [-1]
     par_impar = [False]
     recorte = [None]
+    crop_x0, crop_y0, crop_x1, crop_y1 = pagina.get_cropbox()
+    alto_crop = crop_y1 - crop_y0
+    cache_recortes = {}
+    cache_recortes_rapidos = {}
 
-    def emitir(pts, cerrado, color, relleno):
+    def punto_crudo(segmento):
+        x, y = ctypes.c_float(), ctypes.c_float()
+        if not pdfium_raw.FPDFPathSegment_GetPoint(segmento, x, y):
+            return None
+        return x.value, y.value
+
+    def punto(segmento, matriz=(1, 0, 0, 1, 0, 0)):
+        crudo = punto_crudo(segmento)
+        if crudo is None:
+            return None
+        a, b, c, d, e, f = matriz
+        x, y = a * crudo[0] + c * crudo[1] + e, \
+               b * crudo[0] + d * crudo[1] + f
+        # Sin restar el CropBox, los planos cuyo MediaBox está centrado en
+        # (0, 0) quedan fuera de la hoja al pasar a coordenadas DXF.
+        return conv((x - crop_x0, alto_crop - (y - crop_y0)))
+
+    def color_de(lector, objeto):
+        canales = [ctypes.c_uint() for _ in range(4)]
+        if not lector(objeto, *canales):
+            return None
+        return tuple(c.value / 255.0 for c in canales[:3])
+
+    def recorte_de(objeto):
+        """Devuelve la caja del clip efectivo, cacheada por su geometría.
+
+        PDFium entrega un handle distinto para cada objeto incluso si el clip
+        es el mismo. Por eso la clave usa paths, segmentos y caja, nunca la
+        identidad del handle.
+        """
+        clip = pdfium_raw.FPDFPageObj_GetClipPath(objeto)
+        if not clip:
+            return None
+        n_paths = pdfium_raw.FPDFClipPath_CountPaths(clip)
+        if n_paths <= 0:
+            return None
+        conteos = [pdfium_raw.FPDFClipPath_CountPathSegments(clip, i)
+                   for i in range(n_paths)]
+        if not any(conteos):
+            return None
+        primero = punto_crudo(pdfium_raw.FPDFClipPath_GetPathSegment(clip, 0, 0))
+        ultimo_i = next(i for i in range(n_paths - 1, -1, -1) if conteos[i])
+        ultimo = punto_crudo(pdfium_raw.FPDFClipPath_GetPathSegment(
+            clip, ultimo_i, conteos[ultimo_i] - 1))
+        if primero is None or ultimo is None:
+            return None
+        # La mayoría de los objetos repite exactamente el mismo clip. Dos
+        # vértices extremos, estructura y conteos permiten saltar su lectura
+        # completa; la entrada almacenada conserva además la caja entera.
+        firma_rapida = (n_paths, tuple(conteos),
+                         tuple(round(v, 6) for v in primero + ultimo))
+        if firma_rapida in cache_recortes_rapidos:
+            return cache_recortes_rapidos[firma_rapida]
+        xs, ys = [], []
+        for i, n_segmentos in enumerate(conteos):
+            for j in range(n_segmentos):
+                segmento = pdfium_raw.FPDFClipPath_GetPathSegment(clip, i, j)
+                p = punto_crudo(segmento)
+                if p is not None:
+                    xs.append(p[0])
+                    ys.append(p[1])
+        if not xs:
+            return None
+        # El clip efectivo ya está en espacio de página; los paths normales
+        # no necesariamente lo están (pueden llevar matriz de Form XObject).
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        a = conv((x0 - crop_x0, alto_crop - (y0 - crop_y0)))
+        b = conv((x1 - crop_x0, alto_crop - (y1 - crop_y0)))
+        caja = (min(a[0], b[0]), min(a[1], b[1]),
+                max(a[0], b[0]), max(a[1], b[1]))
+        firma = (n_paths, tuple(conteos),
+                 tuple(round(v, 6) for v in caja))
+        if firma in cache_recortes:
+            caja = cache_recortes[firma]
+        else:
+            cache_recortes[firma] = caja
+        cache_recortes_rapidos[firma_rapida] = caja
+        return caja
+
+    def emitir(pts, cerrado, color, relleno, circulo=None, caja_trazo=None):
         caja = recorte[0]
         if caja is not None:
-            xs = [q[0] for q in pts]
-            ys = [q[1] for q in pts]
             # si cabe entero dentro, no hay nada que recortar
-            if not (xs and caja[0] <= min(xs) and max(xs) <= caja[2]
-                    and caja[1] <= min(ys) and max(ys) <= caja[3]):
+            if caja_trazo is None:
+                xs = [q[0] for q in pts]
+                ys = [q[1] for q in pts]
+                caja_trazo = (min(xs), min(ys), max(xs), max(ys)) if xs else None
+            if not (caja_trazo is not None and caja[0] <= caja_trazo[0]
+                    and caja_trazo[2] <= caja[2]
+                    and caja[1] <= caja_trazo[1]
+                    and caja_trazo[3] <= caja[3]):
                 if relleno or cerrado:
                     pts = recorta_cerrado(pts, caja)
                     if len(pts) < 3:
@@ -331,96 +422,116 @@ def extraer_trazos(pagina, conv):
                     for tramo in recorta_abierto(pts, caja):
                         _emitir(tramo, cerrado, color, relleno)
                     return
-        _emitir(pts, cerrado, color, relleno)
+        _emitir(pts, cerrado, color, relleno, circulo)
 
-    def _emitir(pts, cerrado, color, relleno):
+    def _emitir(pts, cerrado, color, relleno, circulo=None):
         # El circulo se detecta AQUI, antes de unir segmentos: la union lo
         # encadenaria con las lineas que lo tocan y dejaria de ser circular.
-        circ = es_circulo(pts)
+        circ = es_circulo(pts) if circulo is None else circulo
         trazos.append(Trazo(pts, cerrado or bool(circ), color, relleno,
                             contador[0], grosor[0], grupo[0], par_impar[0],
                             circ))
         contador[0] += 1
 
-    # extended=True entrega tambien las mascaras de recorte del PDF.
-    # Sin ellas se importan las lineas COMPLETAS que el PDF recorta, y la
-    # trama de fondo aparece con casi el doble de longitud de la que tiene
-    # en el plano de AutoCAD.
-    try:
-        dibujos = pagina.get_drawings(extended=True)
-    except TypeError:
-        dibujos = pagina.get_drawings()
+    def emitir_actual(pts, cerrado, color, relleno, caja_trazo):
+        # PDFium suele materializar el último segmento de ``h`` hasta el
+        # punto inicial; PyMuPDF sólo marcaba closePath. Conservamos el mismo
+        # contrato (vértices sin repetir + cerrado) para no sumar el borde
+        # final dos veces al escribir/comparar la polilínea.
+        circulo = es_circulo(pts)
+        if cerrado and not relleno and len(pts) > 2 and \
+                dist(pts[0], pts[-1]) <= TOLERANCIA_UNION:
+            pts = pts[:-1]
+        emitir(pts, cerrado, color, relleno, circulo, caja_trazo)
 
-    pila = []          # (nivel, caja de recorte en pulgadas)
-    for n_camino, camino in enumerate(dibujos):
-        nivel = camino.get("level", 0)
-        while pila and pila[-1][0] >= nivel:
-            pila.pop()
-
-        if camino.get("type") == "clip":
-            sc = camino.get("scissor")
-            if sc is not None:
-                a, b = conv((sc.x0, sc.y1)), conv((sc.x1, sc.y0))
-                pila.append((nivel, (min(a[0], b[0]), min(a[1], b[1]),
-                                     max(a[0], b[0]), max(a[1], b[1]))))
+    # get_objects() desciende en Form XObjects. Su iteración es el orden de
+    # pintura que el motor conserva para hatches y tabla de redraw.
+    for n_objeto, obj in enumerate(pagina.get_objects(max_depth=15)):
+        if obj.type != pdfium_raw.FPDF_PAGEOBJ_PATH:
             continue
-
-        # con extended=True aparecen entradas que no son trazos (grupos,
-        # capas opcionales) y no traen "items"
-        if "items" not in camino:
+        objeto = obj.raw
+        matriz = obj.get_matrix().get()
+        fill_mode, stroke = ctypes.c_long(), ctypes.c_long()
+        if not pdfium_raw.FPDFPath_GetDrawMode(objeto, fill_mode, stroke):
             continue
+        relleno = fill_mode.value != pdfium_raw.FPDF_FILLMODE_NONE
+        color = color_de(pdfium_raw.FPDFPageObj_GetFillColor if relleno
+                         else pdfium_raw.FPDFPageObj_GetStrokeColor, objeto)
+        ancho = ctypes.c_float()
+        pdfium_raw.FPDFPageObj_GetStrokeWidth(objeto, ancho)
+        grosor[0] = grosor_dxf(ancho.value) if stroke.value else -1
+        par_impar[0] = fill_mode.value == pdfium_raw.FPDF_FILLMODE_ALTERNATE
+        grupo[0] = n_objeto
+        recorte[0] = recorte_de(objeto)
 
-        recorte[0] = pila[-1][1] if pila else None
-        grupo[0] = n_camino
-        relleno = camino.get("fill") is not None
-        color   = camino.get("fill") if relleno else camino.get("color")
-        cerrado = bool(camino.get("closePath")) or relleno
-        grosor[0] = grosor_dxf(camino.get("width"))
-        par_impar[0] = bool(camino.get("even_odd"))
-
-        actual = []
-        for item in camino["items"]:
-            tipo = item[0]
-
-            if tipo == "l":
-                a, b = conv(item[1]), conv(item[2])
-                if not actual:
-                    actual = [a]
-                elif dist(actual[-1], a) > TOLERANCIA_UNION:
-                    if len(actual) > 1:
-                        emitir(actual, cerrado, color, relleno)
-                    actual = [a]
-                actual.append(b)
-
-            elif tipo == "c":
-                p0, p1, p2, p3 = (conv(item[i]) for i in range(1, 5))
-                if not actual:
-                    actual = [p0]
-                elif dist(actual[-1], p0) > TOLERANCIA_UNION:
-                    if len(actual) > 1:
-                        emitir(actual, cerrado, color, relleno)
-                    actual = [p0]
-                actual.extend(bezier(p0, p1, p2, p3))
-
-            elif tipo == "re":
+        actual, cerrado = [], False
+        x_min = x_max = y_min = y_max = None
+        n_segmentos = pdfium_raw.FPDFPath_CountSegments(objeto)
+        i = 0
+        while i < n_segmentos:
+            segmento = pdfium_raw.FPDFPath_GetPathSegment(objeto, i)
+            tipo = pdfium_raw.FPDFPathSegment_GetType(segmento)
+            p = punto(segmento, matriz)
+            if p is None:
+                i += 1
+                continue
+            if tipo == pdfium_raw.FPDF_SEGMENT_MOVETO:
                 if len(actual) > 1:
-                    emitir(actual, cerrado, color, relleno)
-                    actual = []
-                r = item[1]
-                emitir([conv((r.x0, r.y0)), conv((r.x1, r.y0)),
-                        conv((r.x1, r.y1)), conv((r.x0, r.y1))],
-                       True, color, relleno)
-
-            elif tipo == "qu":
-                if len(actual) > 1:
-                    emitir(actual, cerrado, color, relleno)
-                    actual = []
-                q = item[1]
-                emitir([conv(q.ul), conv(q.ur), conv(q.lr), conv(q.ll)],
-                       True, color, relleno)
-
+                    emitir_actual(actual, cerrado or relleno, color, relleno,
+                                  (x_min, y_min, x_max, y_max))
+                actual, cerrado = [p], False
+                x_min = x_max = p[0]
+                y_min = y_max = p[1]
+            elif tipo == pdfium_raw.FPDF_SEGMENT_LINETO:
+                if not actual:
+                    actual = [p]
+                    x_min = x_max = p[0]
+                    y_min = y_max = p[1]
+                else:
+                    actual.append(p)
+                    x_min = p[0] if p[0] < x_min else x_min
+                    x_max = p[0] if p[0] > x_max else x_max
+                    y_min = p[1] if p[1] < y_min else y_min
+                    y_max = p[1] if p[1] > y_max else y_max
+                cerrado = cerrado or bool(pdfium_raw.FPDFPathSegment_GetClose(segmento))
+            elif tipo == pdfium_raw.FPDF_SEGMENT_BEZIERTO:
+                # Una cúbica aparece como tres BEZIERTO: dos controles y el
+                # destino. PDFium no agrupa esos tres segmentos por nosotros.
+                if i + 2 < n_segmentos and actual:
+                    s2 = pdfium_raw.FPDFPath_GetPathSegment(objeto, i + 1)
+                    s3 = pdfium_raw.FPDFPath_GetPathSegment(objeto, i + 2)
+                    p2, p3 = punto(s2, matriz), punto(s3, matriz)
+                    if (pdfium_raw.FPDFPathSegment_GetType(s2) ==
+                            pdfium_raw.FPDF_SEGMENT_BEZIERTO and
+                            pdfium_raw.FPDFPathSegment_GetType(s3) ==
+                            pdfium_raw.FPDF_SEGMENT_BEZIERTO and
+                            p2 is not None and p3 is not None):
+                        nuevos = bezier(actual[-1], p, p2, p3)
+                        actual.extend(nuevos)
+                        for q in nuevos:
+                            x_min = q[0] if q[0] < x_min else x_min
+                            x_max = q[0] if q[0] > x_max else x_max
+                            y_min = q[1] if q[1] < y_min else y_min
+                            y_max = q[1] if q[1] > y_max else y_max
+                        cerrado = cerrado or bool(
+                            pdfium_raw.FPDFPathSegment_GetClose(s3))
+                        i += 2
+                    else:
+                        actual.append(p)
+                        x_min = p[0] if p[0] < x_min else x_min
+                        x_max = p[0] if p[0] > x_max else x_max
+                        y_min = p[1] if p[1] < y_min else y_min
+                        y_max = p[1] if p[1] > y_max else y_max
+                else:
+                    actual.append(p)
+                    x_min = p[0] if p[0] < x_min else x_min
+                    x_max = p[0] if p[0] > x_max else x_max
+                    y_min = p[1] if p[1] < y_min else y_min
+                    y_max = p[1] if p[1] > y_max else y_max
+            i += 1
         if len(actual) > 1:
-            emitir(actual, cerrado, color, relleno)
+            emitir_actual(actual, cerrado or relleno, color, relleno,
+                          (x_min, y_min, x_max, y_max))
 
     return trazos
 
@@ -585,104 +696,103 @@ def estilo_para(dxf, nombre_fuente, cache):
     return "Standard", CAP_POR_DEFECTO, "arial.ttf"
 
 
-_FUENTES_MEDIDA = {}
-
-
-# Donde buscar los TTF para medir anchos de texto. Si no se encuentra la
-# fuente no pasa nada grave: el factor de anchura se queda en 1.0 y el texto
-# sale como lo dejaria AutoCAD.
-CARPETAS_FUENTES = [
-    "C:/Windows/Fonts",
-    os.path.expanduser("~/AppData/Local/Microsoft/Windows/Fonts"),
-    "/usr/share/fonts/truetype/msttcorefonts",
-    "/usr/share/fonts/truetype",
-    "/usr/local/share/fonts",
-    os.path.expanduser("~/.fonts"),
-    "/Library/Fonts",
-    "/System/Library/Fonts/Supplemental",
-    os.path.expanduser("~/Library/Fonts"),
-]
-
-
-def fuente_medida(ttf):
-    """Carga (una vez) la fuente real para poder medir anchos."""
-    if ttf not in _FUENTES_MEDIDA:
-        _FUENTES_MEDIDA[ttf] = None
-        for carpeta in CARPETAS_FUENTES:
-            ruta = os.path.join(carpeta, ttf)
-            if not os.path.isfile(ruta):
-                continue
-            try:
-                _FUENTES_MEDIDA[ttf] = fitz.Font(fontfile=ruta)
-                break
-            except Exception:
-                continue
-    return _FUENTES_MEDIDA[ttf]
-
-
-def factor_ancho(texto, ttf, tam_pt, ancho_pt):
-    """Cuanto hay que comprimir o estirar el texto para ocupar lo mismo
-    que en el PDF.
-
-    El PDF puede escalar el texto horizontalmente (operador Tz) o usar una
-    fuente condensada que no viaja al DXF. Sin corregirlo, un titulo
-    comprimido al 63% se dibuja al 100% y se sale de su casilla. AutoCAD
-    tampoco lo resuelve al importar: aqui se hace mejor que su importacion.
-    """
-    if not texto or ancho_pt <= 0:
-        return 1.0
-    f = fuente_medida(ttf)
-    if f is None:
-        return 1.0
-    try:
-        natural = f.text_length(texto, fontsize=tam_pt)
-    except Exception:
-        return 1.0
-    if natural <= 0:
-        return 1.0
-    factor = ancho_pt / natural
-    return factor if 0.2 <= factor <= 5.0 else 1.0
-
-
 def escapa_mtext(t):
     """MTEXT trata \\, { y } como formato; hay que escaparlos."""
     return t.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
 
 
 def extraer_texto(pagina, conv):
-    fragmentos = []
-    for bloque in pagina.get_text("dict").get("blocks", []):
-        for linea in bloque.get("lines", []):
-            dx, dy = linea.get("dir", (1, 0))
-            rot = math.degrees(math.atan2(-dy, dx))
-            for span in linea.get("spans", []):
-                txt = span.get("text", "").strip()
-                if not txt:
-                    continue
-                c = span.get("color", 0)
-                bb = span.get("bbox", (0, 0, 0, 0))
-                # En un span girado el avance del texto va en vertical, asi
-                # que su "ancho" es el alto de la caja. Medir siempre el
-                # ancho daba factores absurdos (1.46) en las letras de los
-                # globos de eje, que van rotadas.
-                horizontal = abs(dy) < 0.01
-                avance = (bb[2] - bb[0]) if horizontal else (bb[3] - bb[1])
-                fragmentos.append({
-                    "texto": txt,
-                    "ins": conv(span["origin"]),
-                    "alto": span.get("size", 10) / PUNTOS_POR_PULGADA,
-                    "tam_pt": span.get("size", 10),
-                    "ancho_pt": avance,
-                    "rot": rot,
-                    "color": c & 0xFFFFFF,
-                    "fuente": span.get("font", ""),
-                })
-    return fragmentos
+    """Extrae objetos de texto PDFium con su escala real de matriz.
+
+    ``get_objects()`` devuelve el orden de pintura, que tambien determina el
+    orden de los MTEXT.  PDFium deja esos objetos sin TextPage, asi que se la
+    asociamos antes de llamar ``extract()``.
+    """
+    def color_relleno(objeto):
+        canales = [ctypes.c_uint() for _ in range(4)]
+        if not pdfium_raw.FPDFPageObj_GetFillColor(objeto, *canales):
+            return 0
+        return ((canales[0].value << 16) | (canales[1].value << 8)
+                | canales[2].value)
+
+    objetos = []
+    textpage = pagina.get_textpage()
+    crop_x0, crop_y0, crop_x1, crop_y1 = pagina.get_cropbox()
+    alto_crop = crop_y1 - crop_y0
+    for obj in pagina.get_objects(max_depth=15):
+        if obj.type != pdfium_raw.FPDF_PAGEOBJ_TEXT:
+            continue
+        obj.textpage = textpage
+        try:
+            texto = obj.extract()
+        except Exception:
+            continue
+        if not texto:
+            continue
+
+        matriz = obj.get_matrix()
+        a, b, c, d, e, f = (matriz.a, matriz.b, matriz.c,
+                             matriz.d, matriz.e, matriz.f)
+        escala_horizontal = math.hypot(a, b)
+        escala_vertical = math.hypot(c, d)
+        tz = escala_horizontal / escala_vertical if escala_vertical else 1.0
+        try:
+            fuente = obj.get_font().get_base_name()
+        except Exception:
+            fuente = ""
+        # PDFium usa el origen inferior izquierdo y coordenadas crudas; conv
+        # espera el origen superior izquierdo relativo al CropBox.
+        ins = conv((e - crop_x0, alto_crop - (f - crop_y0)))
+        izquierda, abajo, derecha, arriba = obj.get_bounds()
+        objetos.append({
+            "texto": texto,
+            "ins": ins, "a": a, "b": b, "e": e, "f": f,
+            "caja": (izquierda, abajo, derecha, arriba),
+            "escala_vertical": escala_vertical,
+            "tz": tz,
+            "rot": math.degrees(math.atan2(b, a)),
+            "color": color_relleno(obj.raw),
+            "fuente": fuente,
+        })
+
+    for objeto in objetos:
+        texto = objeto["texto"].strip()
+        # Algunos espacios separadores quedan al final de un objeto PDFium
+        # cuando el siguiente continua la misma linea. Se conservan solo si
+        # la siguiente caja empieza a distancia tipografica: asi no se
+        # pierden al limpiar el artefacto de borde, ni se agregan espacios a
+        # etiquetas independientes que terminan con uno en el contenido PDF.
+        if objeto["texto"].endswith((" ", "\t", "\r", "\n")):
+            a, b = objeto["a"], objeto["b"]
+            escala = math.hypot(a, b)
+            if escala:
+                ux, uy = a / escala, b / escala
+                vx, vy = -uy, ux
+                e, f = objeto["e"], objeto["f"]
+                l, abajo, r, arriba = objeto["caja"]
+                fin = max((x - e) * ux + (y - f) * uy
+                          for x, y in ((l, abajo), (l, arriba),
+                                       (r, abajo), (r, arriba)))
+                for siguiente in objetos:
+                    if siguiente is objeto or not siguiente["texto"].strip():
+                        continue
+                    da = siguiente["e"] - e
+                    df = siguiente["f"] - f
+                    avance = da * ux + df * uy - fin
+                    lateral = da * vx + df * vy
+                    giro = abs(a * siguiente["b"] - b * siguiente["a"])
+                    if (-0.1 <= avance <= 6.0 and abs(lateral) <= 1.0
+                            and giro <= 0.01 * escala
+                            * math.hypot(siguiente["a"], siguiente["b"])):
+                        texto += " "
+                        break
+        objeto["texto"] = texto
+    return objetos
 
 
 # ------------------------------------------------------------------ imagenes
 
-def extraer_imagenes(doc, pagina, conv, dxf, msp, carpeta_img, nombre_dibujo):
+def extraer_imagenes(pagina, conv, dxf, msp, carpeta_img, nombre_dibujo):
     """Guarda las imagenes raster como PNG y las referencia desde el DXF.
 
     AutoCAD hace lo mismo con su carpeta 'PDF Images': el DXF no incrusta la
@@ -704,33 +814,37 @@ def extraer_imagenes(doc, pagina, conv, dxf, msp, carpeta_img, nombre_dibujo):
                              hashlib.sha1(stem.encode("utf-8")).hexdigest()[:8])
     nombre_dibujo = seguro or "drawing"
 
+    crop_x0, crop_y0, crop_x1, crop_y1 = pagina.get_cropbox()
+    alto_crop = crop_y1 - crop_y0
     n = 0
-    try:
-        info = pagina.get_image_info(xrefs=True)
-    except Exception:
-        return 0
-    for k, im in enumerate(info):
-        xref = im.get("xref", 0)
-        if not xref:
+    for k, objeto in enumerate(pagina.get_objects(max_depth=15)):
+        if objeto.type != pdfium_raw.FPDF_PAGEOBJ_IMAGE:
             continue
         try:
-            pix = fitz.Pixmap(doc, xref)
-            if pix.n - pix.alpha >= 4:          # CMYK -> RGB
-                pix = fitz.Pixmap(fitz.csRGB, pix)
+            ancho_px, alto_px = objeto.get_px_size()
+            bitmap = objeto.get_bitmap(render=False)
+            imagen = bitmap.to_pil()
             carpeta_img.mkdir(parents=True, exist_ok=True)
             ruta = carpeta_img / f"{nombre_dibujo}_{k:04d}.png"
-            pix.save(ruta)
+            imagen.save(ruta)
         except Exception:
             continue
 
-        x0, y0 = conv((im["bbox"][0], im["bbox"][3]))   # esquina inferior izq
-        x1, y1 = conv((im["bbox"][2], im["bbox"][1]))
+        try:
+            izquierda, abajo, derecha, arriba = objeto.get_bounds()
+        except Exception:
+            continue
+        # PDFium entrega coordenadas crudas, origen abajo-izquierda. ``conv``
+        # usa el contrato heredado: origen arriba-izquierda relativo al
+        # CropBox. Esta es la misma normalizacion de trazos y texto.
+        x0, y0 = conv((izquierda - crop_x0, alto_crop - (abajo - crop_y0)))
+        x1, y1 = conv((derecha - crop_x0, alto_crop - (arriba - crop_y0)))
         ancho, alto = abs(x1 - x0), abs(y1 - y0)
         if ancho <= 0 or alto <= 0:
             continue
         try:
             idef = dxf.add_image_def(filename=f"{carpeta_img.name}/{ruta.name}",
-                                     size_in_pixel=(pix.width, pix.height))
+                                     size_in_pixel=(ancho_px, alto_px))
             msp.add_image(image_def=idef, insert=(x0, y0),
                           size_in_units=(ancho, alto),
                           dxfattribs={"layer": CAPA_IMG})
@@ -885,9 +999,10 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
     _modo_capas = capas
     t0 = time.time()
     ruta_pdf, ruta_dxf = Path(ruta_pdf), Path(ruta_dxf)
-    doc = fitz.open(ruta_pdf)
-    pagina = doc[pagina_num]
-    conv = Lienzo(pagina.rect.height)
+    doc_pdfium = pdfium.PdfDocument(str(ruta_pdf))
+    pagina_pdfium = doc_pdfium[pagina_num]
+    crop_x0, crop_y0, crop_x1, crop_y1 = pagina_pdfium.get_cropbox()
+    conv = Lienzo(crop_y1 - crop_y0)
 
     # setup=False: con setup=True ezdxf mete 30 estilos de texto propios
     # (Liberation, OpenSans...) que AutoCAD no crea. La importacion de
@@ -900,7 +1015,8 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
         if capa not in dxf.layers:
             dxf.layers.add(capa)
 
-    trazos = extraer_trazos(pagina, conv)
+    trazos = extraer_trazos(pagina_pdfium, conv)
+    fragmentos_texto = extraer_texto(pagina_pdfium, conv) if con_texto else []
     brutos = len(trazos)
     if unir:
         trazos = unir_trazos(trazos)
@@ -996,23 +1112,13 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
     n_ajustados = [0]
     if con_texto:
         cache = set()
-        for f in extraer_texto(pagina, conv):
-            estilo, cap, ttf = estilo_para(dxf, f["fuente"], cache)
-            fac = factor_ancho(f["texto"], ttf, f["tam_pt"], f["ancho_pt"])
-            # Solo se corrige compresion real: la medicion PDFium encontro
-            # Tz != 1 en 256/256 spans con fac < 1, pero Tz = 1 en 9/9 con
-            # fac > 1. Estos ultimos son ruido de metricas del subset de fuente,
-            # no estiramiento del PDF.
-            corregir_ancho = 0 < fac < 0.95
-            # PyMuPDF devuelve en span["size"] la media geometrica de las
-            # escalas cuando el PDF usa Tz. Para los spans corregidos, la
-            # escala vertical real es tam_pt / fac; asi la altura y \W^2
-            # conservan el mismo producto (alto * ancho) de antes.
-            if corregir_ancho:
-                alto = (f["tam_pt"] / fac / PUNTOS_POR_PULGADA) * cap
-            else:
-                # Sin correccion se conserva exactamente la altura anterior.
-                alto = f["alto"] * cap
+        for f in fragmentos_texto:
+            estilo, cap, _ttf = estilo_para(dxf, f["fuente"], cache)
+            alto = f["escala_vertical"] / PUNTOS_POR_PULGADA * cap
+            # Tz viene directamente de las dos columnas de la matriz PDF;
+            # este margen solo evita ensuciar el DXF con un \W cosmetico
+            # cuando la escala es practicamente 1, no filtra ruido medido.
+            corregir_ancho = abs(f["tz"] - 1.0) > 0.005
             attr = {
                 "layer": "0" if _modo_capas == "una" else CAPA_TEXTO,
                 "style": estilo,
@@ -1038,12 +1144,9 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
             x, y = f["ins"]
             attr["insert"] = (x, y - 0.017 * alto)
             cuerpo = escapa_mtext(f["texto"])
-            # Solo si la diferencia es real (>5%). Por debajo es ruido de
-            # medicion: el subconjunto de fuente embebido en el PDF no tiene
-            # metricas identicas al Arial del sistema.
             if corregir_ancho:
                 # \W es el codigo de MTEXT para el factor de anchura
-                cuerpo = "\\W%.4f;%s" % (fac ** 2, cuerpo)
+                cuerpo = "\\W%.4f;%s" % (f["tz"], cuerpo)
                 n_ajustados[0] += 1
             t_ent = msp.add_mtext(cuerpo, dxfattribs=attr)
             # el texto siempre al frente
@@ -1052,7 +1155,7 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
 
     n_img = 0
     if con_imagenes:
-        n_img = extraer_imagenes(doc, pagina, conv, dxf, msp,
+        n_img = extraer_imagenes(pagina_pdfium, conv, dxf, msp,
                                  ruta_dxf.parent / "PDF Images", ruta_dxf.name)
 
     # --- Zoom extension al abrir ---------------------------------------
@@ -1101,6 +1204,8 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
         dxf.saveas(ruta_dxf, fmt="bin")
     else:
         dxf.saveas(ruta_dxf)
+    pagina_pdfium.close()
+    doc_pdfium.close()
     return {
         "trazos_brutos": brutos,
         "polilineas": n_poli,
@@ -1113,8 +1218,8 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
         "imagenes": n_img,
         "total": n_poli + n_circ + n_arco + n_hatch + n_txt + n_img,
         "segundos": round(time.time() - t0, 1),
-        "hoja": (round(pagina.rect.width / 72, 2),
-                 round(pagina.rect.height / 72, 2)),
+        "hoja": (round((crop_x1 - crop_x0) / 72, 2),
+                 round((crop_y1 - crop_y0) / 72, 2)),
     }
 
 

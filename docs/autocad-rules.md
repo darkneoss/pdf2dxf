@@ -14,6 +14,25 @@ of them breaks fidelity.
 the font's em size. Verified across the whole distribution: 6pt→0.0597,
 8pt→0.0796, 10pt→0.0995.
 
+**...and "font size" means the vertical scale, not the geometric mean.** When
+the PDF compresses text horizontally the text matrix is not uniform, and the
+two scales differ. AutoCAD takes the vertical one. This matters because
+PyMuPDF's `span["size"]` reports `sqrt(|ad-bc|)`, the geometric mean of both,
+which is smaller by `sqrt(Tz)`: for a title at Tz = 0.40 it gives 48.73 pt
+where the vertical scale is 77.04 and AutoCAD writes 77.04 × 0.716 = 55.15.
+Taking the mean for the height draws the title at 63% of its size — correct in
+width, squashed in height. PDFium hands over both scales separately, so the
+question does not arise: height from `hypot(c, d)`, width factor from
+`hypot(a, b) / hypot(c, d)`.
+
+**Inferring that width factor from bounding boxes invents compression.**
+Before the factor was read from the matrix it was inferred, by comparing the
+span's bbox against the natural width of the system font. Measured against the
+true value on 265 spans: every one of the 256 genuinely compressed spans was
+detected, but so were 9 spans whose real factor was exactly 1.0000 — the
+embedded font subset simply does not measure like the installed Arial. Those
+nine were being stretched by up to 6% for no reason.
+
 **Colours are truncated, not rounded.** AutoCAD writes (0,63,128) where
 rounding gives (0,64,128). That affects ~13,700 entities in a single drawing.
 
