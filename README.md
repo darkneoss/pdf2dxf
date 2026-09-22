@@ -191,6 +191,9 @@ are the ones that differ.
 
 ---
 
+How each of those changes was measured, and against what, is in
+**[docs/desarrollo/](docs/desarrollo/README.en.md)** — the development log.
+
 The rules of AutoCAD's importer that had to be reverse engineered to get
 here are in **[docs/autocad-rules.md](docs/autocad-rules.md)** — useful if
 you plan to change the engine.

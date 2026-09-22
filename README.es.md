@@ -193,6 +193,9 @@ filas marcadas con `<-` son las que difieren.
 
 ---
 
+Cómo se midió cada uno de esos cambios, y contra qué, está en
+**[docs/desarrollo/](docs/desarrollo/README.md)** — la bitácora de desarrollo.
+
 Las reglas del importador de AutoCAD que hubo que deducir para llegar hasta
 aquí están en **[docs/reglas-autocad.md](docs/reglas-autocad.md)** — útiles
 si vas a tocar el motor.
