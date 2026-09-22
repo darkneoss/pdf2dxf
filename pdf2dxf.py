@@ -792,7 +792,8 @@ def extraer_texto(pagina, conv):
 
 # ------------------------------------------------------------------ imagenes
 
-def extraer_imagenes(pagina, conv, dxf, msp, carpeta_img, nombre_dibujo):
+def extraer_imagenes(pagina, conv, dxf, msp, carpeta_img, nombre_dibujo,
+                     unir_teselas=False):
     """Guarda las imagenes raster como PNG y las referencia desde el DXF.
 
     AutoCAD hace lo mismo con su carpeta 'PDF Images': el DXF no incrusta la
@@ -823,8 +824,17 @@ def extraer_imagenes(pagina, conv, dxf, msp, carpeta_img, nombre_dibujo):
 
     crop_x0, crop_y0, crop_x1, crop_y1 = pagina.get_cropbox()
     punt_tol = 0.005 * PUNTOS_POR_PULGADA
-    sin_unir = ("--no-merge-images" in sys.argv or
-                "--sin-unir-imagenes" in sys.argv)
+    # Union de teselas: APAGADA por defecto a proposito. El DXF que produce
+    # es correcto -- tamano en pixeles, u_pixel y v_pixel cuadran con el PNG
+    # y con la envolvente de las teselas dentro de 1e-6 pulgadas-- pero
+    # AutoCAD no dibuja los PNG que resultan: con 21,120 x 960 px reporta
+    # Width = 1.6 en vez de 35.2, o sea usa el ancho de UNA tesela, y la
+    # fachada sale a un treceavo de su ancho. Un DXF impecable que la
+    # aplicacion destino no muestra esta roto igual. Se deja accesible con
+    # --merge-images para quien quiera retomarlo: la hipotesis sin probar es
+    # que estorba la relacion de aspecto (23:1) y no el ancho absoluto, y
+    # que unir en bloques cuadrados de 4x4 teselas lo evitaria.
+    sin_unir = not unir_teselas
 
     def caja_matriz(m):
         puntos = ((m.e, m.f), (m.e + m.a, m.f + m.b),
@@ -1082,7 +1092,7 @@ def capa_de(trazo, capa_por_tipo):
 def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
               con_imagenes=True, con_rellenos=True, capas="tipo",
               sin_mascaras=False, con_arcos=False, binario=False,
-              pagina_num=0):
+              pagina_num=0, unir_teselas=False):
     """Opciones espejo del dialogo Importar PDF de AutoCAD:
         unir          -> unir segmentos de linea y arco contiguos
         con_rellenos  -> importar rellenos solidos
@@ -1264,7 +1274,8 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
     n_img = 0
     if con_imagenes:
         n_img = extraer_imagenes(pagina_pdfium, conv, dxf, msp,
-                                 ruta_dxf.parent / "PDF Images", ruta_dxf.name)
+                                 ruta_dxf.parent / "PDF Images", ruta_dxf.name,
+                                 unir_teselas=unir_teselas)
 
     # --- Zoom extension al abrir ---------------------------------------
     #
@@ -1413,6 +1424,7 @@ def main():
         sin_mascaras=bandera("--no-masks", "--sin-mascaras"),
         con_arcos=bandera("--arcs", "--arcos"),
         binario=bandera("--binary", "--binario"),
+        unir_teselas=bandera("--merge-images", "--unir-imagenes"),
         capas=capas,
     )
 
