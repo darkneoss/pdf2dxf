@@ -81,6 +81,7 @@ Funcionan en inglés y en español; entre corchetes, el alias.
 | `--layers=color` [`--capas=color`] | Una capa por color del objeto |
 | `--layers=single` [`--capas=una`] | Todo en la capa 0 |
 | `--arcs` [`--arcos`] | Reconstruir arcos (desactivado: puede inventar curvas) |
+| `--merge-images` [`--unir-imagenes`] | Unir teselas ráster en menos imágenes (desactivado: ver abajo) |
 | `--binary` [`--binario`] | DXF binario: mismo contenido, la mitad de tamaño |
 | `--batch` [`--lote`] | Convertir todos los PDF de una carpeta |
 | `--dwg` | Convertir también a DWG con ODA File Converter |
@@ -120,6 +121,16 @@ proyecto/
         A-02-planta-azoteas.dxf
         A-06-canalones.dxf
 ```
+
+Algunos PDF trocean una fachada sombreada en una rejilla de teselas ráster:
+uno de estos planos llega con 375, de las cuales 134 son papel en blanco y se
+descartan. `--unir-imagenes` cose el resto en 16, y el DXF que escribe es
+correcto: tamaño en píxeles, ejes de la imagen y envolvente de colocación
+cuadran con una millonésima de pulgada. AutoCAD igual no lo dibuja: de un
+ráster de 21,120 px de ancho reporta 1.6 unidades en vez de 35.2, y la
+fachada sale a un treceavo de su ancho. Por eso está apagada, y se conserva
+sólo para quien quiera retomarlo; la hipótesis sin probar es que estorba la
+relación de aspecto de 23:1 y no el ancho absoluto.
 
 Cómo leer la salida: **raw** son los contornos encontrados en el PDF y **poly**
 en cuántas polilíneas se unieron — la diferencia entre ambos es la unión

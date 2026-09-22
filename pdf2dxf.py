@@ -819,7 +819,8 @@ def extraer_texto(pagina, conv):
 
 # ------------------------------------------------------------------ imagenes
 
-def extraer_imagenes(pagina, conv, dxf, msp, carpeta_img, nombre_dibujo):
+def extraer_imagenes(pagina, conv, dxf, msp, carpeta_img, nombre_dibujo,
+                     unir_teselas=False):
     """Guarda las imagenes raster como PNG y las referencia desde el DXF.
 
     AutoCAD hace lo mismo con su carpeta 'PDF Images': el DXF no incrusta la
@@ -841,9 +842,40 @@ def extraer_imagenes(pagina, conv, dxf, msp, carpeta_img, nombre_dibujo):
                              hashlib.sha1(stem.encode("utf-8")).hexdigest()[:8])
     nombre_dibujo = seguro or "drawing"
 
+    # Una IMAGE de DXF no tiene un atributo de giro: ``u_pixel`` y
+    # ``v_pixel`` son los dos ejes de la imagen.  PDFium entrega justamente
+    # esos ejes en la matriz del objeto, por unidad de la imagen (no por
+    # pixel).  No se puede sustituir por la caja, porque se pierden el giro y
+    # las escalas independientes de ambos ejes.
+    from PIL import Image, ImageStat
+
     crop_x0, crop_y0, crop_x1, crop_y1 = pagina.get_cropbox()
-    alto_crop = crop_y1 - crop_y0
-    n = 0
+    punt_tol = 0.005 * PUNTOS_POR_PULGADA
+    # Union de teselas: APAGADA por defecto a proposito. El DXF que produce
+    # es correcto -- tamano en pixeles, u_pixel y v_pixel cuadran con el PNG
+    # y con la envolvente de las teselas dentro de 1e-6 pulgadas-- pero
+    # AutoCAD no dibuja los PNG que resultan: con 21,120 x 960 px reporta
+    # Width = 1.6 en vez de 35.2, o sea usa el ancho de UNA tesela, y la
+    # fachada sale a un treceavo de su ancho. Un DXF impecable que la
+    # aplicacion destino no muestra esta roto igual. Se deja accesible con
+    # --merge-images para quien quiera retomarlo: la hipotesis sin probar es
+    # que estorba la relacion de aspecto (23:1) y no el ancho absoluto, y
+    # que unir en bloques cuadrados de 4x4 teselas lo evitaria.
+    sin_unir = not unir_teselas
+
+    def caja_matriz(m):
+        puntos = ((m.e, m.f), (m.e + m.a, m.f + m.b),
+                  (m.e + m.c, m.f + m.d),
+                  (m.e + m.a + m.c, m.f + m.b + m.d))
+        xs, ys = zip(*puntos)
+        return min(xs), min(ys), max(xs), max(ys)
+
+    def es_blanca(imagen):
+        # La media RGB evita descartar un logotipo con transparencia; el alfa
+        # no es contenido de dibujo por si mismo.
+        return sum(ImageStat.Stat(imagen.convert("RGB")).mean) / 3 >= 254
+
+    teselas = []
     for k, objeto in enumerate(pagina.get_objects(max_depth=15)):
         if objeto.type != pdfium_raw.FPDF_PAGEOBJ_IMAGE:
             continue
@@ -856,28 +888,123 @@ def extraer_imagenes(pagina, conv, dxf, msp, carpeta_img, nombre_dibujo):
             continue
         try:
             ancho_px, alto_px = objeto.get_px_size()
-            bitmap = objeto.get_bitmap(render=False)
-            imagen = bitmap.to_pil()
-            carpeta_img.mkdir(parents=True, exist_ok=True)
-            ruta = carpeta_img / f"{nombre_dibujo}_{k:04d}.png"
-            imagen.save(ruta)
+            imagen = objeto.get_bitmap(render=False).to_pil()
+            matriz = objeto.get_matrix()
+            bounds = objeto.get_bounds()
         except Exception:
             continue
-
-        # PDFium entrega coordenadas crudas, origen abajo-izquierda. ``conv``
-        # usa el contrato heredado: origen arriba-izquierda relativo al
-        # CropBox. Esta es la misma normalizacion de trazos y texto.
-        x0, y0 = conv((izquierda - crop_x0, alto_crop - (abajo - crop_y0)))
-        x1, y1 = conv((derecha - crop_x0, alto_crop - (arriba - crop_y0)))
-        ancho, alto = abs(x1 - x0), abs(y1 - y0)
-        if ancho <= 0 or alto <= 0:
+        # Mismo criterio que trazos y texto: lo que queda por completo fuera
+        # del CropBox es invisible en el PDF y no debe llegar al DXF.
+        if fuera_cropbox(tuple(bounds),
+                         (crop_x0, crop_y0, crop_x1, crop_y1)):
             continue
+        if ancho_px <= 0 or alto_px <= 0 or es_blanca(imagen):
+            continue
+        teselas.append({"k": k, "imagen": imagen, "ancho_px": ancho_px,
+                        "alto_px": alto_px, "m": matriz,
+                        "caja": tuple(bounds)})
+
+    # Al volver a convertir un dibujo no dejes PNG de una ejecucion anterior
+    # sin IMAGEDEF. El prefijo es exclusivamente de este dibujo desde 1aefb9e.
+    carpeta_img.mkdir(parents=True, exist_ok=True)
+    prefijo = nombre_dibujo + "_"
+    for vieja in carpeta_img.glob(prefijo + "*.png"):
+        sufijo = vieja.stem[len(prefijo):]
+        if sufijo.isdigit():
+            vieja.unlink()
+
+    def compatible(t):
+        m = t["m"]
+        # Las teselas que conocemos son una cuadrilla sin giro. No se intenta
+        # unir otra imagen aparentemente parecida: conservarla individual es
+        # siempre exacto.
+        return (m.a > 0 and m.d > 0 and abs(m.b) < 1e-6 and abs(m.c) < 1e-6)
+
+    def une_tramo(tramo):
+        """Devuelve una tesela compuesta solo si conserva su envolvente."""
+        if len(tramo) == 1:
+            return tramo
+        primero, ultimo = tramo[0], tramo[-1]
+        m0, mn = primero["m"], ultimo["m"]
+        ancho_px = sum(t["ancho_px"] for t in tramo)
+        alto_px = primero["alto_px"]
+        # La anchura fisica sale de los extremos reales, no de multiplicar un
+        # paso nominal de 1.600 in. Asi absorbe las costuras de 1.601/1.602.
+        a_total = mn.e + mn.a - m0.e
+        matriz = pdfium.PdfMatrix(a_total, 0, 0, m0.d, m0.e, m0.f)
+        caja_unida = caja_matriz(matriz)
+        cajas = [t["caja"] for t in tramo]
+        envolvente = (min(c[0] for c in cajas), min(c[1] for c in cajas),
+                      max(c[2] for c in cajas), max(c[3] for c in cajas))
+        if max(abs(a - b) for a, b in zip(caja_unida, envolvente)) > punt_tol:
+            return tramo
+        imagen = Image.new(primero["imagen"].mode, (ancho_px, alto_px))
+        x = 0
+        for tesela in tramo:
+            imagen.paste(tesela["imagen"], (x, 0))
+            x += tesela["ancho_px"]
+        return [{"k": primero["k"], "imagen": imagen,
+                 "ancho_px": ancho_px, "alto_px": alto_px, "m": matriz,
+                 "caja": envolvente}]
+
+    if not sin_unir:
+        # Primero separamos filas con el mismo eje vertical; despues, dentro
+        # de cada una, cortamos en cada blanco o costura que no sea contigua.
+        candidatas = sorted((t for t in teselas if compatible(t)),
+                            key=lambda t: t["m"].f)
+        filas = []
+        while candidatas:
+            base = candidatas.pop(0)
+            m = base["m"]
+            fila, quedan = [base], []
+            for t in candidatas:
+                mt = t["m"]
+                misma_fila = (t["ancho_px"] == base["ancho_px"] and
+                              t["alto_px"] == base["alto_px"] and
+                              t["imagen"].mode == base["imagen"].mode and
+                              abs(mt.f - m.f) <= punt_tol and
+                              abs(mt.d - m.d) <= punt_tol)
+                (fila if misma_fila else quedan).append(t)
+            candidatas = quedan
+            filas.append(fila)
+
+        usados = {id(t) for fila in filas for t in fila}
+        resultado = [t for t in teselas if id(t) not in usados]
+        for fila in filas:
+            fila.sort(key=lambda t: t["m"].e)
+            tramo = []
+            for t in fila:
+                if (tramo and abs(t["m"].e -
+                                  (tramo[-1]["m"].e + tramo[-1]["m"].a))
+                        > punt_tol):
+                    resultado.extend(une_tramo(tramo))
+                    tramo = []
+                tramo.append(t)
+            if tramo:
+                resultado.extend(une_tramo(tramo))
+        teselas = sorted(resultado, key=lambda t: t["k"])
+
+    n = 0
+    for tesela in teselas:
         try:
+            ruta = carpeta_img / f"{nombre_dibujo}_{tesela['k']:04d}.png"
+            tesela["imagen"].save(ruta)
+            ancho_px, alto_px, m = (tesela["ancho_px"], tesela["alto_px"],
+                                    tesela["m"])
             idef = dxf.add_image_def(filename=f"{carpeta_img.name}/{ruta.name}",
                                      size_in_pixel=(ancho_px, alto_px))
-            msp.add_image(image_def=idef, insert=(x0, y0),
-                          size_in_units=(ancho, alto),
-                          dxfattribs={"layer": CAPA_IMG})
+            # El origen DXF es abajo-izquierda relativo al CropBox, igual que
+            # la matriz PDF; no aplicar aqui el volteo temporal que ``conv``
+            # necesita para paths y texto.
+            imagen_dxf = msp.add_image(image_def=idef,
+                                       insert=((m.e - crop_x0) / 72,
+                                               (m.f - crop_y0) / 72),
+                                       size_in_units=(1, 1),
+                                       dxfattribs={"layer": CAPA_IMG})
+            imagen_dxf.dxf.u_pixel = (m.a / 72 / ancho_px,
+                                      m.b / 72 / ancho_px, 0)
+            imagen_dxf.dxf.v_pixel = (m.c / 72 / alto_px,
+                                      m.d / 72 / alto_px, 0)
             n += 1
         except Exception:
             continue
@@ -1004,7 +1131,7 @@ def capa_de(trazo, capa_por_tipo):
 def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
               con_imagenes=True, con_rellenos=True, capas="tipo",
               sin_mascaras=False, con_arcos=False, binario=False,
-              pagina_num=0):
+              pagina_num=0, unir_teselas=False):
     """Opciones espejo del dialogo Importar PDF de AutoCAD:
         unir          -> unir segmentos de linea y arco contiguos
         con_rellenos  -> importar rellenos solidos
@@ -1186,7 +1313,8 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
     n_img = 0
     if con_imagenes:
         n_img = extraer_imagenes(pagina_pdfium, conv, dxf, msp,
-                                 ruta_dxf.parent / "PDF Images", ruta_dxf.name)
+                                 ruta_dxf.parent / "PDF Images", ruta_dxf.name,
+                                 unir_teselas=unir_teselas)
 
     # --- Zoom extension al abrir ---------------------------------------
     #
@@ -1335,6 +1463,7 @@ def main():
         sin_mascaras=bandera("--no-masks", "--sin-mascaras"),
         con_arcos=bandera("--arcs", "--arcos"),
         binario=bandera("--binary", "--binario"),
+        unir_teselas=bandera("--merge-images", "--unir-imagenes"),
         capas=capas,
     )
 

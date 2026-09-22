@@ -79,6 +79,7 @@ work.
 | `--layers=color` [`--capas=color`] | One layer per object colour |
 | `--layers=single` [`--capas=una`] | Everything on layer 0 |
 | `--arcs` [`--arcos`] | Rebuild arcs (off by default: may invent curves) |
+| `--merge-images` [`--unir-imagenes`] | Stitch tiled rasters into fewer images (off by default: see below) |
 | `--binary` [`--binario`] | Binary DXF: same content, half the size |
 | `--batch` [`--lote`] | Convert every PDF in a folder |
 | `--dwg` | Also convert to DWG with ODA File Converter |
@@ -118,6 +119,16 @@ proyecto/
         A-02-roof-plan.dxf
         A-06-drainage.dxf
 ```
+
+Some PDFs slice a shaded elevation into a grid of raster tiles — one drawing
+here arrives as 375 of them, 134 of which are blank paper and get dropped.
+`--merge-images` stitches the rest into 16, and the DXF it writes is correct:
+pixel size, image axes and the placement envelope all agree to within a
+millionth of an inch. AutoCAD still refuses to draw the result, reporting a
+21,120-pixel-wide raster as 1.6 units instead of 35.2, so the elevation
+renders at a thirteenth of its width. The flag is off for that reason, and
+kept only for anyone who wants to pick the problem up; the untested guess is
+that the 23:1 aspect ratio is what breaks it, not the absolute width.
 
 Reading the output: **raw** is the number of contours found in the PDF and
 **poly** how many polylines they were joined into — the gap between the two is
