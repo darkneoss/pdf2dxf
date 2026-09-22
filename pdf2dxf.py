@@ -303,6 +303,19 @@ class Trazo:
         self.circulo = circulo
 
 
+def fuera_cropbox(caja, cropbox):
+    """True si una caja PDF queda por completo fuera del CropBox visible.
+
+    PDFium expone todos los objetos del content stream, incluso los que el
+    visor nunca pinta por quedar fuera de la pagina. PyMuPDF los recortaba
+    implicitamente al extraer. Los limites que solo cruzan el borde se dejan:
+    el recorte de contenido parcialmente visible es otro asunto.
+    """
+    izquierda, abajo, derecha, arriba = caja
+    x0, y0, x1, y1 = cropbox
+    return (derecha < x0 or izquierda > x1 or arriba < y0 or abajo > y1)
+
+
 # ------------------------------------------------------------------ geometria
 
 def extraer_trazos(pagina, conv):
@@ -449,6 +462,13 @@ def extraer_trazos(pagina, conv):
     for n_objeto, obj in enumerate(pagina.get_objects(max_depth=15)):
         if obj.type != pdfium_raw.FPDF_PAGEOBJ_PATH:
             continue
+        try:
+            if fuera_cropbox(obj.get_bounds(),
+                             (crop_x0, crop_y0, crop_x1, crop_y1)):
+                continue
+        except Exception:
+            # Sin caja no se puede demostrar que sea invisible: se conserva.
+            pass
         objeto = obj.raw
         matriz = obj.get_matrix().get()
         fill_mode, stroke = ctypes.c_long(), ctypes.c_long()
@@ -722,6 +742,13 @@ def extraer_texto(pagina, conv):
     for obj in pagina.get_objects(max_depth=15):
         if obj.type != pdfium_raw.FPDF_PAGEOBJ_TEXT:
             continue
+        try:
+            if fuera_cropbox(obj.get_bounds(),
+                             (crop_x0, crop_y0, crop_x1, crop_y1)):
+                continue
+        except Exception:
+            # Sin caja no se puede demostrar que sea invisible: se conserva.
+            pass
         obj.textpage = textpage
         try:
             texto = obj.extract()
@@ -821,6 +848,13 @@ def extraer_imagenes(pagina, conv, dxf, msp, carpeta_img, nombre_dibujo):
         if objeto.type != pdfium_raw.FPDF_PAGEOBJ_IMAGE:
             continue
         try:
+            izquierda, abajo, derecha, arriba = objeto.get_bounds()
+        except Exception:
+            continue
+        if fuera_cropbox((izquierda, abajo, derecha, arriba),
+                         (crop_x0, crop_y0, crop_x1, crop_y1)):
+            continue
+        try:
             ancho_px, alto_px = objeto.get_px_size()
             bitmap = objeto.get_bitmap(render=False)
             imagen = bitmap.to_pil()
@@ -830,10 +864,6 @@ def extraer_imagenes(pagina, conv, dxf, msp, carpeta_img, nombre_dibujo):
         except Exception:
             continue
 
-        try:
-            izquierda, abajo, derecha, arriba = objeto.get_bounds()
-        except Exception:
-            continue
         # PDFium entrega coordenadas crudas, origen abajo-izquierda. ``conv``
         # usa el contrato heredado: origen arriba-izquierda relativo al
         # CropBox. Esta es la misma normalizacion de trazos y texto.
