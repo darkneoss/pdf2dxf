@@ -12,7 +12,9 @@ en número de entidades es del **0.2%**, y la extensión, los colores de capa,
 las alturas de texto y los estilos coinciden.
 
 Y en un punto concreto lo mejora: **respeta la compresión horizontal del
-texto**, que AutoCAD descarta al importar.
+texto**, que AutoCAD descarta al importar. El factor se lee directamente de la
+matriz del texto, así que es exacto y no inferido — y no hace falta tener
+ninguna fuente instalada para que funcione, en cualquier plataforma.
 
 ---
 
@@ -38,6 +40,8 @@ los mismos nombres que usa AutoCAD, para no romper flujos existentes.
   escribe de forma fiable. DXF lo abre AutoCAD y cualquier otro CAD. Con
   `--dwg` se usa [ODA File Converter](https://www.opendesign.com/guestfiles/oda_file_converter)
   si está instalado (gratuito, propietario, se instala aparte).
+  Por honestidad: ese camino nunca se ejerció aquí, porque el conversor nunca
+  se instaló. El camino probado es el de DXF.
 - **Recuperar el proyecto original.** Del PDF salen geometría, texto y
   rellenos en tres capas: no hay bloques, ni capas del proyecto, ni cotas
   asociativas. Si quien emitió los planos conserva el DWG o el RVT, pedirlo

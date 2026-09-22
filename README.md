@@ -11,7 +11,9 @@ by entity and property by property, until its behaviour was reproduced. On a
 extents, layer colours, text heights and styles match.
 
 On one point it does better: it **honours the horizontal compression of text**,
-which AutoCAD discards on import.
+which AutoCAD discards on import. The factor is read straight from the text
+matrix, so it is exact rather than inferred — and no font has to be installed
+for it to work, on any platform.
 
 ---
 
@@ -37,6 +39,8 @@ the same names AutoCAD uses, so existing workflows keep working.
   reliably. DXF opens natively in AutoCAD and every other CAD package. With
   `--dwg` the tool uses [ODA File Converter](https://www.opendesign.com/guestfiles/oda_file_converter)
   if it is installed — free of charge, proprietary, installed separately.
+  In the interest of honesty: that path has never been exercised here, because
+  the converter was never installed. The DXF path is the tested one.
 - **Recover the original project.** A PDF yields geometry, text and fills on
   three layers: no blocks, no project layers, no associative dimensions. If
   whoever issued the drawings still has the DWG or the RVT, asking for it
