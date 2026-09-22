@@ -1,6 +1,7 @@
-# Lectura de PDF. AGPL-3.0 o licencia comercial de Artifex.
-# Es la razon de que este proyecto sea AGPL.
-PyMuPDF>=1.24
+# Lectura de PDF mediante PDFium.
+pypdfium2>=4.30
+# ``PdfBitmap.to_pil()`` para guardar las imagenes extraidas.
+Pillow>=10.0
 
 # Escritura de DXF. MIT.
 ezdxf>=1.3

@@ -7,8 +7,7 @@
 #
 # Se distribuye con la esperanza de que sea util, pero SIN GARANTIA ALGUNA.
 #
-# La licencia es AGPL porque PyMuPDF, la libreria de lectura de PDF, es
-# AGPL-3.0 (o comercial de Artifex). ezdxf, la de escritura, es MIT.
+# La licencia vigente del proyecto consta en LICENSE.
 """
 pdf2dxf.py - vector PDF to DXF converter. No AutoCAD, no licences, no cloud.
 
@@ -57,7 +56,6 @@ import time
 import ctypes
 from pathlib import Path
 
-import fitz          # PyMuPDF: lectura del PDF
 import ezdxf         # escritura del DXF
 import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_raw
@@ -275,7 +273,7 @@ def recorta_cerrado(pts, caja):
 
 
 class Lienzo:
-    """Coordenadas de PyMuPDF (origen arriba-izquierda, puntos) ->
+    """Coordenadas relativas al CropBox, origen arriba-izquierda, puntos ->
     coordenadas DXF (origen abajo-izquierda, pulgadas)."""
 
     def __init__(self, alto_puntos):
@@ -796,7 +794,7 @@ def extraer_texto(pagina, conv):
 
 # ------------------------------------------------------------------ imagenes
 
-def extraer_imagenes(doc, pagina, conv, dxf, msp, carpeta_img, nombre_dibujo):
+def extraer_imagenes(pagina, conv, dxf, msp, carpeta_img, nombre_dibujo):
     """Guarda las imagenes raster como PNG y las referencia desde el DXF.
 
     AutoCAD hace lo mismo con su carpeta 'PDF Images': el DXF no incrusta la
@@ -818,33 +816,37 @@ def extraer_imagenes(doc, pagina, conv, dxf, msp, carpeta_img, nombre_dibujo):
                              hashlib.sha1(stem.encode("utf-8")).hexdigest()[:8])
     nombre_dibujo = seguro or "drawing"
 
+    crop_x0, crop_y0, crop_x1, crop_y1 = pagina.get_cropbox()
+    alto_crop = crop_y1 - crop_y0
     n = 0
-    try:
-        info = pagina.get_image_info(xrefs=True)
-    except Exception:
-        return 0
-    for k, im in enumerate(info):
-        xref = im.get("xref", 0)
-        if not xref:
+    for k, objeto in enumerate(pagina.get_objects(max_depth=15)):
+        if objeto.type != pdfium_raw.FPDF_PAGEOBJ_IMAGE:
             continue
         try:
-            pix = fitz.Pixmap(doc, xref)
-            if pix.n - pix.alpha >= 4:          # CMYK -> RGB
-                pix = fitz.Pixmap(fitz.csRGB, pix)
+            ancho_px, alto_px = objeto.get_px_size()
+            bitmap = objeto.get_bitmap(render=False)
+            imagen = bitmap.to_pil()
             carpeta_img.mkdir(parents=True, exist_ok=True)
             ruta = carpeta_img / f"{nombre_dibujo}_{k:04d}.png"
-            pix.save(ruta)
+            imagen.save(ruta)
         except Exception:
             continue
 
-        x0, y0 = conv((im["bbox"][0], im["bbox"][3]))   # esquina inferior izq
-        x1, y1 = conv((im["bbox"][2], im["bbox"][1]))
+        try:
+            izquierda, abajo, derecha, arriba = objeto.get_bounds()
+        except Exception:
+            continue
+        # PDFium entrega coordenadas crudas, origen abajo-izquierda. ``conv``
+        # usa el contrato heredado: origen arriba-izquierda relativo al
+        # CropBox. Esta es la misma normalizacion de trazos y texto.
+        x0, y0 = conv((izquierda - crop_x0, alto_crop - (abajo - crop_y0)))
+        x1, y1 = conv((derecha - crop_x0, alto_crop - (arriba - crop_y0)))
         ancho, alto = abs(x1 - x0), abs(y1 - y0)
         if ancho <= 0 or alto <= 0:
             continue
         try:
             idef = dxf.add_image_def(filename=f"{carpeta_img.name}/{ruta.name}",
-                                     size_in_pixel=(pix.width, pix.height))
+                                     size_in_pixel=(ancho_px, alto_px))
             msp.add_image(image_def=idef, insert=(x0, y0),
                           size_in_units=(ancho, alto),
                           dxfattribs={"layer": CAPA_IMG})
@@ -999,11 +1001,10 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
     _modo_capas = capas
     t0 = time.time()
     ruta_pdf, ruta_dxf = Path(ruta_pdf), Path(ruta_dxf)
-    doc = fitz.open(ruta_pdf)
-    pagina = doc[pagina_num]
-    conv = Lienzo(pagina.rect.height)
     doc_pdfium = pdfium.PdfDocument(str(ruta_pdf))
     pagina_pdfium = doc_pdfium[pagina_num]
+    crop_x0, crop_y0, crop_x1, crop_y1 = pagina_pdfium.get_cropbox()
+    conv = Lienzo(crop_y1 - crop_y0)
 
     # setup=False: con setup=True ezdxf mete 30 estilos de texto propios
     # (Liberation, OpenSans...) que AutoCAD no crea. La importacion de
@@ -1018,8 +1019,6 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
 
     trazos = extraer_trazos(pagina_pdfium, conv)
     fragmentos_texto = extraer_texto(pagina_pdfium, conv) if con_texto else []
-    pagina_pdfium.close()
-    doc_pdfium.close()
     brutos = len(trazos)
     if unir:
         trazos = unir_trazos(trazos)
@@ -1158,7 +1157,7 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
 
     n_img = 0
     if con_imagenes:
-        n_img = extraer_imagenes(doc, pagina, conv, dxf, msp,
+        n_img = extraer_imagenes(pagina_pdfium, conv, dxf, msp,
                                  ruta_dxf.parent / "PDF Images", ruta_dxf.name)
 
     # --- Zoom extension al abrir ---------------------------------------
@@ -1207,6 +1206,8 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
         dxf.saveas(ruta_dxf, fmt="bin")
     else:
         dxf.saveas(ruta_dxf)
+    pagina_pdfium.close()
+    doc_pdfium.close()
     return {
         "trazos_brutos": brutos,
         "polilineas": n_poli,
@@ -1219,8 +1220,8 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
         "imagenes": n_img,
         "total": n_poli + n_circ + n_arco + n_hatch + n_txt + n_img,
         "segundos": round(time.time() - t0, 1),
-        "hoja": (round(pagina.rect.width / 72, 2),
-                 round(pagina.rect.height / 72, 2)),
+        "hoja": (round((crop_x1 - crop_x0) / 72, 2),
+                 round((crop_y1 - crop_y0) / 72, 2)),
     }
 
 
