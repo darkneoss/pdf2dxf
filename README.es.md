@@ -82,6 +82,7 @@ Funcionan en inglés y en español; entre corchetes, el alias.
 | `--layers=single` [`--capas=una`] | Todo en la capa 0 |
 | `--arcs` [`--arcos`] | Reconstruir arcos (desactivado: puede inventar curvas) |
 | `--merge-images` [`--unir-imagenes`] | Unir teselas ráster en menos imágenes (desactivado: ver abajo) |
+| `--linetypes` [`--tipos-linea`] | Reconstruir líneas guionadas como una polilínea con tipo de línea (desactivado) |
 | `--binary` [`--binario`] | DXF binario: mismo contenido, la mitad de tamaño |
 | `--batch` [`--lote`] | Convertir todos los PDF de una carpeta |
 | `--dwg` | Convertir también a DWG con ODA File Converter |
@@ -121,6 +122,20 @@ proyecto/
         A-02-planta-azoteas.dxf
         A-06-canalones.dxf
 ```
+
+Las líneas guionadas llegan como fragmentos sueltos, porque el exportador
+aplana el guionado en segmentos separados: un eje puede ser 153 polilíneas de
+dos puntos, y ninguno de estos PDF trae un arreglo de guiones que leer en su
+lugar. `--tipos-linea` agrupa los fragmentos que comparten recta, color y
+grosor, y donde los huecos son regulares los reemplaza por una sola polilínea
+con un tipo de línea generado. Quita entre 12% y 18% de las entidades, y un
+eje pasa a ser un objeto que puedes seleccionar, reestilar o estirar. El
+filtro es estricto a propósito: exige cuatro fragmentos, huecos regulares y
+ningún hueco mayor al doble de la mediana, para no cruzar nunca una
+interrupción real del plano. En un plano fusiona 54 de 104 rectas candidatas
+y deja el resto intacto. El importador de AutoCAD no hace nada de esto —no
+crea ningún tipo de línea—, así que no hay con qué comparar: júzgalo contra
+el PDF.
 
 Algunos PDF trocean una fachada sombreada en una rejilla de teselas ráster:
 uno de estos planos llega con 375, de las cuales 134 son papel en blanco y se

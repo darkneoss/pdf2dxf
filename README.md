@@ -80,6 +80,7 @@ work.
 | `--layers=single` [`--capas=una`] | Everything on layer 0 |
 | `--arcs` [`--arcos`] | Rebuild arcs (off by default: may invent curves) |
 | `--merge-images` [`--unir-imagenes`] | Stitch tiled rasters into fewer images (off by default: see below) |
+| `--linetypes` [`--tipos-linea`] | Rebuild dashed lines as one polyline with a linetype (off by default) |
 | `--binary` [`--binario`] | Binary DXF: same content, half the size |
 | `--batch` [`--lote`] | Convert every PDF in a folder |
 | `--dwg` | Also convert to DWG with ODA File Converter |
@@ -119,6 +120,20 @@ proyecto/
         A-02-roof-plan.dxf
         A-06-drainage.dxf
 ```
+
+Dashed lines arrive as loose fragments, because the exporter flattens the
+dash pattern into separate segments — an axis line can be 153 two-point
+polylines, and none of these PDFs carries a dash array to read instead.
+`--linetypes` groups the fragments that share a line, a colour and a
+lineweight, and where the gaps are regular it replaces them with a single
+polyline carrying a generated linetype. It removes 12% to 18% of the
+entities, and an axis becomes one object you can select, restyle or stretch.
+The filter is deliberately strict: it needs four fragments, evenly spaced
+gaps and no gap wider than twice the median, so a real break in the drawing
+is never bridged. On one drawing it merges 54 of 104 candidate lines and
+leaves the rest alone. AutoCAD's own importer does none of this — it creates
+no linetypes at all — so there is nothing to compare against; judge it
+against the PDF.
 
 Some PDFs slice a shaded elevation into a grid of raster tiles — one drawing
 here arrives as 375 of them, 134 of which are blank paper and get dropped.

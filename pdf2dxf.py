@@ -39,6 +39,7 @@ Spanish aliases in brackets still work:
     --layers=color   [--capas=color]   one layer per object colour
     --layers=single  [--capas=una]     everything on layer 0
     --arcs           [--arcos]         rebuild arcs (off: may invent curves)
+    --linetypes      [--tipos-linea]   rebuild flattened dashed strokes
     --binary         [--binario]       binary DXF (half the size)
     --batch          [--lote]          convert every PDF in a folder
     --dwg                              also convert to DWG with ODA File
@@ -63,6 +64,18 @@ SEGMENTOS_BEZIER = 8          # tramos por curva al aplanar
 RADIO_MAXIMO = 60.0           # pulgadas: mas grande que cualquier hoja
 DESVIO_MAXIMO = 0.004         # pulgadas de desviacion admitida al ajustar
 TOLERANCIA_UNION = 1e-6       # pulgadas; para encadenar segmentos
+
+# Revit puede exportar un tipo de linea como muchos paths cortos, sin
+# conservar el arreglo de guiones del PDF. Estos limites son deliberadamente
+# conservadores: una linea continua falsa sobre un hueco real es peor que
+# dejar varios fragmentos para editar.
+REDONDEO_DIRECCION = 4         # componentes del vector unitario
+REDONDEO_OFFSET = 0.001        # pulgadas; no junta paralelas vecinas
+# Algunos tipos "center" alternan un guion largo y uno corto; por eso el
+# filtro de longitudes admite esa variacion. La regularidad decisiva es la de
+# los huecos, que ademas se protegen contra un salto de mas de dos medianas.
+CV_MAXIMO_GUIONES = 0.75
+CV_MAXIMO_HUECOS = 0.25
 
 CAPA_GEOM  = "PDF_Geometry"
 CAPA_TEXTO = "PDF_Text"
@@ -292,15 +305,17 @@ class Trazo:
     y tapar lo que hay abajo (los globos de eje salian negros por esto).
     """
     __slots__ = ("pts", "cerrado", "color", "relleno", "orden", "grosor",
-                 "grupo", "par_impar", "circulo")
+                 "grupo", "par_impar", "circulo", "patron_linea")
 
     def __init__(self, pts, cerrado, color, relleno, orden, grosor=-1,
-                 grupo=-1, par_impar=False, circulo=None):
+                 grupo=-1, par_impar=False, circulo=None, patron_linea=None):
         self.pts, self.cerrado = pts, cerrado
         self.color, self.relleno, self.orden = color, relleno, orden
         self.grosor, self.grupo = grosor, grupo
         self.par_impar = par_impar
         self.circulo = circulo
+        # (guion, hueco), temporal hasta que se agrupa en un tipo DXF.
+        self.patron_linea = patron_linea
 
 
 def fuera_cropbox(caja, cropbox):
@@ -699,6 +714,179 @@ def unir_trazos(trazos):
 
     salida.sort(key=lambda t: t.orden)
     return salida
+
+
+def mediana(valores):
+    """Mediana sin depender de numpy para una pasada muy pequena."""
+    valores = sorted(valores)
+    n = len(valores)
+    medio = n // 2
+    return valores[medio] if n % 2 else (valores[medio - 1] + valores[medio]) / 2
+
+
+def coeficiente_variacion(valores):
+    if not valores:
+        return float("inf")
+    media = sum(valores) / len(valores)
+    if media <= 0:
+        return float("inf")
+    return math.sqrt(sum((v - media) ** 2 for v in valores) / len(valores)) / media
+
+
+def clave_recta_guionada(t):
+    """Clave de recta infinita para fragmentos de dos puntos.
+
+    La direccion se hace canonica para que el mismo eje, aun si PDFium
+    entrega algun guion al reves, termine en el mismo grupo. El offset se
+    redondea a una milésima de pulgada: absorbe el ruido de float del PDF,
+    pero mantiene separadas las lineas paralelas de un plano.
+    """
+    if len(t.pts) != 2 or t.relleno or t.cerrado:
+        return None
+    (x0, y0), (x1, y1) = t.pts
+    largo = math.hypot(x1 - x0, y1 - y0)
+    if largo <= 1e-12:
+        return None
+    ux, uy = (x1 - x0) / largo, (y1 - y0) / largo
+    if ux < 0 or (abs(ux) <= 1e-12 and uy < 0):
+        ux, uy = -ux, -uy
+    offset = -uy * x0 + ux * y0
+    return (round(ux, REDONDEO_DIRECCION), round(uy, REDONDEO_DIRECCION),
+            round(offset / REDONDEO_OFFSET), t.color, t.grosor)
+
+
+def reconstruir_lineas_guionadas(trazos):
+    """Convierte grupos regulares de guiones a una sola polilinea.
+
+    PDFium expone los arreglos de guiones, pero los PDF de Revit ya los
+    aplanaron en paths independientes. Por eso se reconocen solo grupos de
+    cuatro o mas fragmentos sobre una misma recta, con guiones y huecos
+    regulares. El limite adicional del hueco maximo evita tender una linea
+    sobre una interrupcion real aunque el coeficiente de variacion pase.
+    """
+    grupos = {}
+    fragmentos_guionables = 0
+    for i, t in enumerate(trazos):
+        clave = clave_recta_guionada(t)
+        if clave is not None:
+            fragmentos_guionables += 1
+            grupos.setdefault(clave, []).append(i)
+
+    reemplazos = {}
+    consumidos = set()
+    patrones_crudos = []
+    candidatas = 0
+    for clave, indices in grupos.items():
+        if len(indices) < 4:
+            continue
+        candidatas += 1
+        ux, uy = clave[0], clave[1]
+        # La direccion redondeada solo sirve para agrupar. Para medir se usa
+        # la direccion exacta del primer fragmento y no se acumula error.
+        base = trazos[indices[0]]
+        (x0, y0), (x1, y1) = base.pts
+        norma = math.hypot(x1 - x0, y1 - y0)
+        ux, uy = (x1 - x0) / norma, (y1 - y0) / norma
+        if ux < 0 or (abs(ux) <= 1e-12 and uy < 0):
+            ux, uy = -ux, -uy
+
+        piezas = []
+        for i in indices:
+            p, q = trazos[i].pts
+            sp, sq = p[0] * ux + p[1] * uy, q[0] * ux + q[1] * uy
+            if sq < sp:
+                p, q, sp, sq = q, p, sq, sp
+            piezas.append((sp, sq, p, q, i))
+        piezas.sort(key=lambda a: (a[0], a[1]))
+        largos = [p[1] - p[0] for p in piezas]
+        huecos = [piezas[i + 1][0] - piezas[i][1]
+                  for i in range(len(piezas) - 1)]
+        if any(h <= 1e-9 for h in huecos):
+            continue
+        med_hueco = mediana(huecos)
+        med_guion = mediana(largos)
+        if (med_hueco <= 0 or med_guion <= 0
+                or coeficiente_variacion(huecos) >= CV_MAXIMO_HUECOS
+                or max(huecos) >= 2 * med_hueco
+                or coeficiente_variacion(largos) >= CV_MAXIMO_GUIONES):
+            continue
+
+        primero, ultimo = piezas[0], piezas[-1]
+        original = trazos[primero[4]]
+        nuevo = Trazo([primero[2], ultimo[3]], False, original.color, False,
+                      min(trazos[p[4]].orden for p in piezas), original.grosor,
+                      original.grupo, original.par_impar, None,
+                      (med_guion, med_hueco))
+        reemplazos[primero[4]] = nuevo
+        consumidos.update(p[4] for p in piezas)
+        patrones_crudos.append((med_guion, med_hueco))
+
+    salida = []
+    for i, t in enumerate(trazos):
+        if i in reemplazos:
+            salida.append(reemplazos[i])
+        elif i not in consumidos:
+            salida.append(t)
+    salida.sort(key=lambda t: t.orden)
+    return salida, {
+        "fragmentos_consumidos": len(consumidos),
+        "fragmentos_guionables": fragmentos_guionables,
+        "polilineas_guionadas": len(reemplazos),
+        "rectas_candidatas": candidatas,
+        "patrones_crudos": patrones_crudos,
+    }
+
+
+def agrupar_patrones_linea(patrones, tolerancia=0.10):
+    """Reduce variantes de float a pocos tipos de linea por hoja."""
+    grupos = []
+    for patron in sorted(patrones):
+        for grupo in grupos:
+            guion, hueco = grupo["centro"]
+            if (abs(patron[0] - guion) <= tolerancia * guion
+                    and abs(patron[1] - hueco) <= tolerancia * hueco):
+                grupo["patrones"].append(patron)
+                n = len(grupo["patrones"])
+                grupo["centro"] = (
+                    sum(p[0] for p in grupo["patrones"]) / n,
+                    sum(p[1] for p in grupo["patrones"]) / n)
+                break
+        else:
+            grupos.append({"centro": patron, "patrones": [patron]})
+
+    # El nombre se deriva del patron final, no del orden de lectura del PDF.
+    usados = set()
+    for grupo in grupos:
+        guion, hueco = grupo["centro"]
+        nombre = "PDF_DASH_%03d_%03d" % (round(guion * 100), round(hueco * 100))
+        base, sufijo = nombre, 2
+        while nombre in usados:
+            nombre = "%s_%d" % (base, sufijo)
+            sufijo += 1
+        usados.add(nombre)
+        grupo["nombre"] = nombre
+    return grupos
+
+
+def asignar_tipos_linea(dxf, trazos, patrones):
+    """Crea los tipos DXF y asigna cada polilinea reconstruida al mas cercano."""
+    grupos = agrupar_patrones_linea(patrones)
+    for grupo in grupos:
+        guion, hueco = grupo["centro"]
+        nombre = grupo["nombre"]
+        if nombre not in dxf.linetypes:
+            dxf.linetypes.add(nombre, pattern=[guion + hueco, guion, -hueco],
+                              description="PDF reconstructed dash %.4f / gap %.4f"
+                              % (guion, hueco))
+    for t in trazos:
+        if t.patron_linea is not None:
+            t.patron_linea = min(
+                grupos,
+                key=lambda g: ((t.patron_linea[0] - g["centro"][0])
+                               / g["centro"][0]) ** 2
+                + ((t.patron_linea[1] - g["centro"][1])
+                   / g["centro"][1]) ** 2)["nombre"]
+    return grupos
 
 
 # --------------------------------------------------------------------- texto
@@ -1131,7 +1319,7 @@ def capa_de(trazo, capa_por_tipo):
 def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
               con_imagenes=True, con_rellenos=True, capas="tipo",
               sin_mascaras=False, con_arcos=False, binario=False,
-              pagina_num=0, unir_teselas=False):
+              pagina_num=0, unir_teselas=False, con_tipos_linea=False):
     """Opciones espejo del dialogo Importar PDF de AutoCAD:
         unir          -> unir segmentos de linea y arco contiguos
         con_rellenos  -> importar rellenos solidos
@@ -1147,6 +1335,10 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
                          que la deteccion por forma convierte tambien
                          cadenas medianas que el deja como polilinea. Una
                          polilinea se ve igual y no inventa geometria.
+        con_tipos_linea -> reconstruir guiones aplanados por el exportador
+                         como una polilinea DXF con tipo de linea. Esta
+                         pasada se deja apagada para que la conversion normal
+                         sea bit a bit igual a la de port-pdfium.
     """
     global _modo_capas
     capas = ALIAS_CAPAS.get(str(capas).lower())
@@ -1177,6 +1369,19 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
     brutos = len(trazos)
     if unir:
         trazos = unir_trazos(trazos)
+    estadistica_lineas = {
+        "fragmentos_consumidos": 0,
+        "fragmentos_guionables": 0,
+        "polilineas_guionadas": 0,
+        "rectas_candidatas": 0,
+        "patrones_crudos": [],
+    }
+    if con_tipos_linea:
+        trazos, estadistica_lineas = reconstruir_lineas_guionadas(trazos)
+        patrones_linea = asignar_tipos_linea(dxf, trazos,
+                                             estadistica_lineas["patrones_crudos"])
+    else:
+        patrones_linea = []
 
     dom_geom = color_dominante(trazos, relleno=False)
     dom_rell = color_dominante(trazos, relleno=True)
@@ -1204,6 +1409,8 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
                 dxf.layers.add(capa)
             attr = {"layer": capa, "lineweight": t.grosor}
             attr.update(atributos_color(t.color, dom_geom))
+            if t.patron_linea is not None:
+                attr["linetype"] = t.patron_linea
             arco = None if (t.circulo or not con_arcos) else es_arco(t.pts)
 
             def escribe_trazo(t=t, attr=attr, arco=arco):
@@ -1374,6 +1581,13 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
         "textos": n_txt,
         "texto_ajustado": n_ajustados[0],
         "imagenes": n_img,
+        "fragmentos_consumidos": estadistica_lineas["fragmentos_consumidos"],
+        "fragmentos_guionables": estadistica_lineas["fragmentos_guionables"],
+        "polilineas_guionadas": estadistica_lineas["polilineas_guionadas"],
+        "rectas_candidatas": estadistica_lineas["rectas_candidatas"],
+        "patrones_crudos": len({(round(a, 4), round(b, 4))
+                                  for a, b in estadistica_lineas["patrones_crudos"]}),
+        "tipos_linea": len(patrones_linea),
         "total": n_poli + n_circ + n_arco + n_hatch + n_txt + n_img,
         "segundos": round(time.time() - t0, 1),
         "hoja": (round((crop_x1 - crop_x0) / 72, 2),
@@ -1436,6 +1650,15 @@ def informe(nombre, r):
           f"masks dropped {r['mascaras_descartadas']}, ")
     print(f"     text {r['textos']} ({r['texto_ajustado']} width-corrected), "
           f"img {r['imagenes']}")
+    if r["polilineas_guionadas"]:
+        ahorro = r["fragmentos_consumidos"] - r["polilineas_guionadas"]
+        print(f"     linetypes: {r['fragmentos_consumidos']} fragments -> "
+              f"{r['polilineas_guionadas']} polylines, net {ahorro}; "
+              f"{r['patrones_crudos']} raw patterns -> {r['tipos_linea']} types "
+              f"({r['rectas_candidatas']} candidate straight groups)")
+        print(f"     fragment balance: {r['fragmentos_guionables']} = "
+              f"{r['fragmentos_consumidos']} consumed + "
+              f"{r['fragmentos_guionables'] - r['fragmentos_consumidos']} intact")
     print(f"     TOTAL {r['total']} entities in {r['segundos']}s")
 
 
@@ -1462,6 +1685,7 @@ def main():
         con_rellenos=not bandera("--no-fills", "--sin-rellenos"),
         sin_mascaras=bandera("--no-masks", "--sin-mascaras"),
         con_arcos=bandera("--arcs", "--arcos"),
+        con_tipos_linea=bandera("--linetypes", "--tipos-linea"),
         binario=bandera("--binary", "--binario"),
         unir_teselas=bandera("--merge-images", "--unir-imagenes"),
         capas=capas,
