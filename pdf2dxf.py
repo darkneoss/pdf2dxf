@@ -1,13 +1,11 @@
 #!/usr/bin/env python
-# Copyright (C) 2026  darkneoss
+# Copyright (c) 2026  darkneoss
 #
-# Este programa es software libre: puede redistribuirlo y modificarlo bajo
-# los terminos de la GNU Affero General Public License version 3, tal como
-# la publica la Free Software Foundation. Vease el archivo LICENSE.
+# Licencia MIT: vease el archivo LICENSE.
 #
-# Se distribuye con la esperanza de que sea util, pero SIN GARANTIA ALGUNA.
-#
-# La licencia vigente del proyecto consta en LICENSE.
+# Se pudo relicenciar a MIT al sustituir PyMuPDF (AGPL-3.0 o comercial de
+# Artifex) por pypdfium2 (BSD-3-Clause sobre PDFium, Apache-2.0). Las otras
+# dependencias ya eran permisivas: ezdxf es MIT y Pillow es MIT-CMU.
 """
 pdf2dxf.py - vector PDF to DXF converter. No AutoCAD, no licences, no cloud.
 

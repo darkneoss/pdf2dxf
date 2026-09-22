@@ -171,7 +171,14 @@ si vas a tocar el motor.
 
 ## Licencia
 
-**AGPL-3.0** — ver [LICENSE](LICENSE).
+**MIT** — ver [LICENSE](LICENSE). Se puede usar en trabajo comercial o de
+código cerrado, sin obligación de devolver nada.
 
-La licencia viene impuesta por [PyMuPDF](https://pymupdf.readthedocs.io/), que
-es AGPL-3.0 o comercial de Artifex. [ezdxf](https://ezdxf.mozman.at/) es MIT.
+Todas las dependencias son permisivas, que es lo que lo hace posible:
+[pypdfium2](https://pypdfium2.readthedocs.io/) es BSD-3-Clause sobre el PDFium
+de Google (Apache-2.0), [ezdxf](https://ezdxf.mozman.at/) es MIT y
+[Pillow](https://python-pillow.org/) es MIT-CMU.
+
+Las versiones anteriores eran AGPL-3.0 porque la lectura del PDF pasaba por
+PyMuPDF, que es AGPL-3.0 o comercial de Artifex. La licencia nunca fue una
+elección, así que se reescribió el lector sobre PDFium para quitarla.

@@ -169,7 +169,14 @@ you plan to change the engine.
 
 ## Licence
 
-**AGPL-3.0** — see [LICENSE](LICENSE).
+**MIT** — see [LICENSE](LICENSE). Use it in commercial or closed-source
+work; nothing has to be given back.
 
-The licence is imposed by [PyMuPDF](https://pymupdf.readthedocs.io/), which is
-AGPL-3.0 or commercial from Artifex. [ezdxf](https://ezdxf.mozman.at/) is MIT.
+Every dependency is permissive, which is what makes that possible:
+[pypdfium2](https://pypdfium2.readthedocs.io/) is BSD-3-Clause over Google's
+PDFium (Apache-2.0), [ezdxf](https://ezdxf.mozman.at/) is MIT and
+[Pillow](https://python-pillow.org/) is MIT-CMU.
+
+Earlier versions were AGPL-3.0, because PDF reading went through PyMuPDF and
+that library is AGPL-3.0 or commercial from Artifex. The licence was never a
+choice, so the PDF reader was rewritten on PDFium to remove it.
