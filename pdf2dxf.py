@@ -700,99 +700,98 @@ def estilo_para(dxf, nombre_fuente, cache):
     return "Standard", CAP_POR_DEFECTO, "arial.ttf"
 
 
-_FUENTES_MEDIDA = {}
-
-
-# Donde buscar los TTF para medir anchos de texto. Si no se encuentra la
-# fuente no pasa nada grave: el factor de anchura se queda en 1.0 y el texto
-# sale como lo dejaria AutoCAD.
-CARPETAS_FUENTES = [
-    "C:/Windows/Fonts",
-    os.path.expanduser("~/AppData/Local/Microsoft/Windows/Fonts"),
-    "/usr/share/fonts/truetype/msttcorefonts",
-    "/usr/share/fonts/truetype",
-    "/usr/local/share/fonts",
-    os.path.expanduser("~/.fonts"),
-    "/Library/Fonts",
-    "/System/Library/Fonts/Supplemental",
-    os.path.expanduser("~/Library/Fonts"),
-]
-
-
-def fuente_medida(ttf):
-    """Carga (una vez) la fuente real para poder medir anchos."""
-    if ttf not in _FUENTES_MEDIDA:
-        _FUENTES_MEDIDA[ttf] = None
-        for carpeta in CARPETAS_FUENTES:
-            ruta = os.path.join(carpeta, ttf)
-            if not os.path.isfile(ruta):
-                continue
-            try:
-                _FUENTES_MEDIDA[ttf] = fitz.Font(fontfile=ruta)
-                break
-            except Exception:
-                continue
-    return _FUENTES_MEDIDA[ttf]
-
-
-def factor_ancho(texto, ttf, tam_pt, ancho_pt):
-    """Cuanto hay que comprimir o estirar el texto para ocupar lo mismo
-    que en el PDF.
-
-    El PDF puede escalar el texto horizontalmente (operador Tz) o usar una
-    fuente condensada que no viaja al DXF. Sin corregirlo, un titulo
-    comprimido al 63% se dibuja al 100% y se sale de su casilla. AutoCAD
-    tampoco lo resuelve al importar: aqui se hace mejor que su importacion.
-    """
-    if not texto or ancho_pt <= 0:
-        return 1.0
-    f = fuente_medida(ttf)
-    if f is None:
-        return 1.0
-    try:
-        natural = f.text_length(texto, fontsize=tam_pt)
-    except Exception:
-        return 1.0
-    if natural <= 0:
-        return 1.0
-    factor = ancho_pt / natural
-    return factor if 0.2 <= factor <= 5.0 else 1.0
-
-
 def escapa_mtext(t):
     """MTEXT trata \\, { y } como formato; hay que escaparlos."""
     return t.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
 
 
 def extraer_texto(pagina, conv):
-    fragmentos = []
-    for bloque in pagina.get_text("dict").get("blocks", []):
-        for linea in bloque.get("lines", []):
-            dx, dy = linea.get("dir", (1, 0))
-            rot = math.degrees(math.atan2(-dy, dx))
-            for span in linea.get("spans", []):
-                txt = span.get("text", "").strip()
-                if not txt:
-                    continue
-                c = span.get("color", 0)
-                bb = span.get("bbox", (0, 0, 0, 0))
-                # En un span girado el avance del texto va en vertical, asi
-                # que su "ancho" es el alto de la caja. Medir siempre el
-                # ancho daba factores absurdos (1.46) en las letras de los
-                # globos de eje, que van rotadas.
-                horizontal = abs(dy) < 0.01
-                avance = (bb[2] - bb[0]) if horizontal else (bb[3] - bb[1])
-                fragmentos.append({
-                    "texto": txt,
-                    "ins": conv(span["origin"]),
-                    "alto": span.get("size", 10) / PUNTOS_POR_PULGADA,
-                    "tam_pt": span.get("size", 10),
-                    "ancho_pt": avance,
-                    "rot": rot,
-                    "color": c & 0xFFFFFF,
-                    "fuente": span.get("font", ""),
-                })
-    return fragmentos
+    """Extrae objetos de texto PDFium con su escala real de matriz.
+
+    ``get_objects()`` devuelve el orden de pintura, que tambien determina el
+    orden de los MTEXT.  PDFium deja esos objetos sin TextPage, asi que se la
+    asociamos antes de llamar ``extract()``.
+    """
+    def color_relleno(objeto):
+        canales = [ctypes.c_uint() for _ in range(4)]
+        if not pdfium_raw.FPDFPageObj_GetFillColor(objeto, *canales):
+            return 0
+        return ((canales[0].value << 16) | (canales[1].value << 8)
+                | canales[2].value)
+
+    objetos = []
+    textpage = pagina.get_textpage()
+    crop_x0, crop_y0, crop_x1, crop_y1 = pagina.get_cropbox()
+    alto_crop = crop_y1 - crop_y0
+    for obj in pagina.get_objects(max_depth=15):
+        if obj.type != pdfium_raw.FPDF_PAGEOBJ_TEXT:
+            continue
+        obj.textpage = textpage
+        try:
+            texto = obj.extract()
+        except Exception:
+            continue
+        if not texto:
+            continue
+
+        matriz = obj.get_matrix()
+        a, b, c, d, e, f = (matriz.a, matriz.b, matriz.c,
+                             matriz.d, matriz.e, matriz.f)
+        escala_horizontal = math.hypot(a, b)
+        escala_vertical = math.hypot(c, d)
+        tz = escala_horizontal / escala_vertical if escala_vertical else 1.0
+        try:
+            fuente = obj.get_font().get_base_name()
+        except Exception:
+            fuente = ""
+        # PDFium usa el origen inferior izquierdo y coordenadas crudas; conv
+        # espera el origen superior izquierdo relativo al CropBox.
+        ins = conv((e - crop_x0, alto_crop - (f - crop_y0)))
+        izquierda, abajo, derecha, arriba = obj.get_bounds()
+        objetos.append({
+            "texto": texto,
+            "ins": ins, "a": a, "b": b, "e": e, "f": f,
+            "caja": (izquierda, abajo, derecha, arriba),
+            "escala_vertical": escala_vertical,
+            "tz": tz,
+            "rot": math.degrees(math.atan2(b, a)),
+            "color": color_relleno(obj.raw),
+            "fuente": fuente,
+        })
+
+    for objeto in objetos:
+        texto = objeto["texto"].strip()
+        # Algunos espacios separadores quedan al final de un objeto PDFium
+        # cuando el siguiente continua la misma linea. Se conservan solo si
+        # la siguiente caja empieza a distancia tipografica: asi no se
+        # pierden al limpiar el artefacto de borde, ni se agregan espacios a
+        # etiquetas independientes que terminan con uno en el contenido PDF.
+        if objeto["texto"].endswith((" ", "\t", "\r", "\n")):
+            a, b = objeto["a"], objeto["b"]
+            escala = math.hypot(a, b)
+            if escala:
+                ux, uy = a / escala, b / escala
+                vx, vy = -uy, ux
+                e, f = objeto["e"], objeto["f"]
+                l, abajo, r, arriba = objeto["caja"]
+                fin = max((x - e) * ux + (y - f) * uy
+                          for x, y in ((l, abajo), (l, arriba),
+                                       (r, abajo), (r, arriba)))
+                for siguiente in objetos:
+                    if siguiente is objeto or not siguiente["texto"].strip():
+                        continue
+                    da = siguiente["e"] - e
+                    df = siguiente["f"] - f
+                    avance = da * ux + df * uy - fin
+                    lateral = da * vx + df * vy
+                    giro = abs(a * siguiente["b"] - b * siguiente["a"])
+                    if (-0.1 <= avance <= 6.0 and abs(lateral) <= 1.0
+                            and giro <= 0.01 * escala
+                            * math.hypot(siguiente["a"], siguiente["b"])):
+                        texto += " "
+                        break
+        objeto["texto"] = texto
+    return objetos
 
 
 # ------------------------------------------------------------------ imagenes
@@ -1018,6 +1017,7 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
             dxf.layers.add(capa)
 
     trazos = extraer_trazos(pagina_pdfium, conv)
+    fragmentos_texto = extraer_texto(pagina_pdfium, conv) if con_texto else []
     pagina_pdfium.close()
     doc_pdfium.close()
     brutos = len(trazos)
@@ -1115,23 +1115,13 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
     n_ajustados = [0]
     if con_texto:
         cache = set()
-        for f in extraer_texto(pagina, conv):
-            estilo, cap, ttf = estilo_para(dxf, f["fuente"], cache)
-            fac = factor_ancho(f["texto"], ttf, f["tam_pt"], f["ancho_pt"])
-            # Solo se corrige compresion real: la medicion PDFium encontro
-            # Tz != 1 en 256/256 spans con fac < 1, pero Tz = 1 en 9/9 con
-            # fac > 1. Estos ultimos son ruido de metricas del subset de fuente,
-            # no estiramiento del PDF.
-            corregir_ancho = 0 < fac < 0.95
-            # PyMuPDF devuelve en span["size"] la media geometrica de las
-            # escalas cuando el PDF usa Tz. Para los spans corregidos, la
-            # escala vertical real es tam_pt / fac; asi la altura y \W^2
-            # conservan el mismo producto (alto * ancho) de antes.
-            if corregir_ancho:
-                alto = (f["tam_pt"] / fac / PUNTOS_POR_PULGADA) * cap
-            else:
-                # Sin correccion se conserva exactamente la altura anterior.
-                alto = f["alto"] * cap
+        for f in fragmentos_texto:
+            estilo, cap, _ttf = estilo_para(dxf, f["fuente"], cache)
+            alto = f["escala_vertical"] / PUNTOS_POR_PULGADA * cap
+            # Tz viene directamente de las dos columnas de la matriz PDF;
+            # este margen solo evita ensuciar el DXF con un \W cosmetico
+            # cuando la escala es practicamente 1, no filtra ruido medido.
+            corregir_ancho = abs(f["tz"] - 1.0) > 0.005
             attr = {
                 "layer": "0" if _modo_capas == "una" else CAPA_TEXTO,
                 "style": estilo,
@@ -1157,12 +1147,9 @@ def convertir(ruta_pdf, ruta_dxf, unir=True, con_texto=True,
             x, y = f["ins"]
             attr["insert"] = (x, y - 0.017 * alto)
             cuerpo = escapa_mtext(f["texto"])
-            # Solo si la diferencia es real (>5%). Por debajo es ruido de
-            # medicion: el subconjunto de fuente embebido en el PDF no tiene
-            # metricas identicas al Arial del sistema.
             if corregir_ancho:
                 # \W es el codigo de MTEXT para el factor de anchura
-                cuerpo = "\\W%.4f;%s" % (fac ** 2, cuerpo)
+                cuerpo = "\\W%.4f;%s" % (f["tz"], cuerpo)
                 n_ajustados[0] += 1
             t_ent = msp.add_mtext(cuerpo, dxfattribs=attr)
             # el texto siempre al frente
